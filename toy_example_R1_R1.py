@@ -2,10 +2,9 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, Matern, Sum
 from scipy.stats import norm
 from BayesianOptimizer import BayesianOptimizer 
-# time
 import time
 
 
@@ -19,13 +18,13 @@ def target_function(x):
     return -np.sin(3 * x) - x**2 + 0.7 * x
 
 # Initialize optimizer
-def init_optimizer():
-    return BayesianOptimizer(
+opt = BayesianOptimizer(
         dimensions=1,
-        bounds=[(-5, 5)],
+        bounds=[(-5,5)],
         noise_level=0.1,
         acquisition_type='EI',
-        fast_mode=True,
+        exploration_rate=0.3,
+        kernel=Matern(nu=1.5) + WhiteKernel(),
         random_state=42
     )
 
@@ -45,7 +44,7 @@ with st.sidebar:
 
 # Initialize Session State
 if 'opt' not in st.session_state or reset_button:
-    st.session_state.opt = init_optimizer()
+    st.session_state.opt = opt
     st.session_state.history = []
 
 # Optimization loop
