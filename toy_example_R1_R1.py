@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, Matern, Sum
 from scipy.stats import norm
-from BayesianOptimizer import BayesianOptimizer 
+from BayesianOptimizer_RnR1 import BayesianOptimizer 
 import time
 
 
