@@ -4,7 +4,10 @@ import matplotlib.pyplot as plt
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel
 from scipy.stats import norm
-from BayesianOptimizer import BayesianOptimizer  # Ensure R3_R1.py is in the same directory
+from BayesianOptimizer import BayesianOptimizer 
+# time
+import time
+
 
 # Configure Streamlit page
 st.set_page_config(page_title="Bayesian Optimization Demo", layout="wide")
@@ -22,9 +25,12 @@ def init_optimizer():
         bounds=[(-5, 5)],
         noise_level=0.1,
         acquisition_type='EI',
-        fast_mode=False,
+        fast_mode=True,
         random_state=42
     )
+
+#initialize time
+elapsed_time = 0
 
 # Create plot containers
 col1 = st.columns(1)[0]
@@ -46,6 +52,11 @@ if 'opt' not in st.session_state or reset_button:
 if run_button:
     progress_bar = st.progress(0)
     status_text = st.empty()
+
+    #calculate progress time
+    start_time = time.time()
+    st.session_state.history = []
+
     
     for i in range(n_iter):
         # Execute optimization iteration
@@ -100,6 +111,8 @@ if run_button:
 
     progress_bar.empty()
     status_text.empty()
+    # Calculate elapsed time
+    elapsed_time = time.time() - start_time
     st.success("Optimization finished!")
 
 # Display final results
@@ -108,6 +121,7 @@ if len(st.session_state.opt.X) > 0:
     best_idx = np.argmax(st.session_state.opt.Y)
     st.write(f"Optimal Solution: x = {st.session_state.opt.X[best_idx][0]:.3f}")
     st.write(f"Optimal Value: {st.session_state.opt.Y[best_idx]:.3f}")
+    st.write(f"Elapsed Time: {elapsed_time:.2f} seconds")
 
 # Display historical data
 with st.expander("View Optimization History"):

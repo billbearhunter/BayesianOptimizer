@@ -96,15 +96,6 @@ class BayesianOptimizer:
         self.sparse_gp = None
         self.inducing_points = None
 
-    def _dynamic_gp(self):
-        """Select appropriate GP model based on iteration count"""
-        if len(self.X) < 1000:  # Use full GP for first 1000 iterations
-            return self.full_gp
-        else:  # Switch to sparse approximation
-            if self.sparse_gp is None:
-                self._init_sparse_gp()
-            return self.sparse_gp
-
     def _init_sparse_gp(self):
         """Initialize sparse GP with inducing points"""
         self.inducing_points = self.X[::2]  # Simple subset selection
@@ -117,6 +108,17 @@ class BayesianOptimizer:
             random_state=self.random_state
         )
         self.sparse_gp.fit(self.inducing_points, self.Y[::2])
+
+    def _dynamic_gp(self):
+        """Select appropriate GP model based on iteration count"""
+        if len(self.X) < 1000000:  # Use full GP for first 1000 iterations
+            return self.full_gp
+        else:  # Switch to sparse approximation
+            if self.sparse_gp is None:
+                self._init_sparse_gp()
+            return self.sparse_gp
+
+
 
     def _acquisition(self, X, gp=None):
         """Numerically stable acquisition function calculation"""
@@ -183,7 +185,7 @@ class BayesianOptimizer:
             self.iteration += 1
             try:
                 current_gp = self._dynamic_gp()
-                if len(self.X) < 1000 or not self.fast_mode:
+                if len(self.X) < 1e10 or not self.fast_mode:
                     current_gp.fit(self.X, self.Y)
                 
                 candidates = self._generate_candidates()
