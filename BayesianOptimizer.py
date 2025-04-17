@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 
 class BayesianOptimizer:
     def __init__(self, dimensions, bounds, 
-                 noise_level=0.1, 
+                 noise_level=1e-3, 
                  acquisition_type='EI',
                  exploration_rate=0.1,
                  fast_mode=True,
@@ -79,7 +79,7 @@ class BayesianOptimizer:
             if self.noise_kernel is None:
                 self.noise_kernel = WhiteKernel(
                     noise_level=noise_level**2,
-                    noise_level_bounds=(1e-10, 1e2)
+                    noise_level_bounds=(1e-12, 1e12)
                 )
 
             kernel = self.base_kernel + self.noise_kernel
@@ -355,7 +355,7 @@ if __name__ == "__main__":
     )
     
     # Run optimization
-    opt.optimize(noisy_sphere, n_iter=200)
+    opt.optimize(noisy_sphere, n_iter=100)
     
     # Visualization using separated class
     vis = BayesianOptimizationVisualizer()
