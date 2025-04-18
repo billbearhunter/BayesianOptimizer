@@ -76,7 +76,7 @@ class BayesianOptimizer:
 
         self.full_gp = GaussianProcessRegressor(
             kernel=full_kernel,
-            n_restarts_optimizer=5,
+            n_restarts_optimizer=1,
             optimizer="fmin_l_bfgs_b",
             normalize_y=True,
             random_state=self.random_state,
