@@ -24,7 +24,7 @@ opt = BayesianOptimizer(
         noise_level=0.1,
         acquisition_type='EI',
         exploration_rate=0.3,
-        kernel=Matern(nu=1.5) + WhiteKernel(),
+        kernel=Matern(nu=1.5),
         random_state=42
     )
 
@@ -79,7 +79,7 @@ if run_button:
         
         # Plot target function and predictions
         if len(X) > 0:
-            gp = st.session_state.opt._dynamic_gp()
+            gp = st.session_state.opt.get_current_gp()
             mu, sigma = gp.predict(x_test, return_std=True)
             
             ax1.plot(x_test, target_function(x_test), 'r:', label='True Function')
@@ -116,10 +116,10 @@ if run_button:
 
 # Display final results
 if len(st.session_state.opt.X) > 0:
-    st.subheader("Optimization Results")
-    best_idx = np.argmax(st.session_state.opt.Y)
-    st.write(f"Optimal Solution: x = {st.session_state.opt.X[best_idx][0]:.3f}")
-    st.write(f"Optimal Value: {st.session_state.opt.Y[best_idx]:.3f}")
+    # st.subheader("Optimization Results")
+    # best_idx = np.argmax(st.session_state.opt.Y)
+    # st.write(f"Optimal Solution: x = {st.session_state.opt.X[best_idx][0]:.3f}")
+    # st.write(f"Optimal Value: {st.session_state.opt.Y[best_idx]:.3f}")
     st.write(f"Elapsed Time: {elapsed_time:.2f} seconds")
 
 # Display historical data
