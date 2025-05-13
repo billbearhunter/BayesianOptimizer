@@ -7,7 +7,7 @@ from botorch.acquisition.objective import ScalarizedPosteriorTransform
 from botorch.optim import optimize_acqf
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.fit import fit_gpytorch_mll
-from .base_optimizer import BaseBayesianOptimizer
+from base_optimizer import BaseBayesianOptimizer
 
 class IndependentBayesianOptimizer(BaseBayesianOptimizer):
     def _fit_model(self):
