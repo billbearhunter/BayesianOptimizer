@@ -5,7 +5,7 @@ from scipy.optimize import minimize
 from scipy.stats import norm
 from scipy.special import erf
 import torch
-from botorch.fit import fit_gpytorch_model
+from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP, MultiTaskGP
 from botorch.models.transforms import Normalize, Standardize
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -106,7 +106,7 @@ class BayesianOptimizer:
                 outcome_transform=Standardize(m=1),
             )
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_model(mll)
+        fit_gpytorch_mll(mll)
         return model
 
     def _acquisition(self, X_cand: np.ndarray, model) -> np.ndarray:

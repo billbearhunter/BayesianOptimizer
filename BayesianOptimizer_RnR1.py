@@ -1,8 +1,9 @@
 
+import time
 import numpy as np
 from scipy.stats import norm
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel, Sum
+from sklearn.gaussian_process.kernels import Matern, WhiteKernel, Sum, RBF
 from scipy.optimize import minimize
 from joblib import Parallel, delayed
 from sklearn.utils.validation import check_random_state
@@ -22,7 +23,7 @@ class BayesianOptimizer:
         self,
         dimensions,
         bounds,
-        noise_level=0.1,
+        noise_level=1e-3,
         acquisition_type="EI",
         exploration_rate=0.1,
         random_state=None,
@@ -56,10 +57,14 @@ class BayesianOptimizer:
 
     def _init_gp_components(self, noise_level, kernel):
         if kernel is None:
+            # self.base_kernel = Matern(
+            #     nu=0.5,
+            #     length_scale_bounds=(1e-5, 1e5),
+            # )
             self.base_kernel = Matern(
-                nu=0.5,
-                length_scale_bounds=(1e-5, 1e3),
-            )
+                nu=1.5,
+                length_scale_bounds=(1e-5, 1e5),
+            ) + RBF(length_scale_bounds=(1e-5, 1e5))
         else:
             self.base_kernel = kernel
 
@@ -71,7 +76,8 @@ class BayesianOptimizer:
         )
 
         full_kernel = (
-            self.base_kernel + self.noise_kernel if self.noise_kernel else self.base_kernel
+            # self.base_kernel + self.noise_kernel if self.noise_kernel else self.base_kernel
+            self.base_kernel
         )
 
         self.full_gp = GaussianProcessRegressor(
@@ -80,6 +86,7 @@ class BayesianOptimizer:
             optimizer="fmin_l_bfgs_b",
             normalize_y=True,
             random_state=self.random_state,
+            # alpha=noise_level ** 2,
         )
 
     # ------------------------------------------------------------------
@@ -159,6 +166,7 @@ class BayesianOptimizer:
 
     # Main optimization loop ---------------------------------------------
     def optimize(self, objective_fn, n_iter):
+        
         if self.X.size == 0:
             self._initial_sample(objective_fn)
 
@@ -167,7 +175,7 @@ class BayesianOptimizer:
             self.iteration += 1
 
             try:
-                current_gp = self._dynamic_gp()
+                current_gp = self.get_current_gp()
                 current_gp.fit(self.X, self.Y)
 
                 candidates = self._generate_candidates()
@@ -244,6 +252,7 @@ class BayesianOptimizationVisualizer:
 
         mu, _ = gp_model.predict(X_test, return_std=True)
         true_vals = np.array([true_function(x) for x in X_test])
+        # mean_squared_error = np.mean((true_vals - mu) ** 2)
         errors = np.abs(true_vals - mu)
 
         fig = make_subplots(
@@ -299,14 +308,18 @@ if __name__ == "__main__":
     opt = BayesianOptimizer(
         dimensions=3,
         bounds=[(-5, 5), (-5, 5), (-5, 5)],
-        noise_level=0.1,
+        noise_level=1e-3,
         acquisition_type="EI",
         exploration_rate=0.3,
-        kernel=Matern(nu=1.5) + WhiteKernel(),
         random_state=42,
     )
 
-    opt.optimize(noisy_sphere, n_iter=20)
+    #opt time
+    elapsed_time = 0
+    start_time = time.time()
+    opt.optimize(noisy_sphere, n_iter=200)
+    elapsed_time = time.time() - start_time
+    print(f"Elapsed time: {elapsed_time:.2f} seconds")
 
     vis = BayesianOptimizationVisualizer()
     vis.plot_optimization_progress(opt.best_values)

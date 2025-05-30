@@ -6,30 +6,30 @@ from multitask_optimizer import MultiTaskBayesianOptimizer
 from botorch.models.transforms.outcome import Standardize
 from visualizer import prepare_dataframes, plot_mse, visualize_streamlit
 
-def target_function(x: np.ndarray) -> np.ndarray:
-    x1, x2, x3 = x
-    y1 = x1**2 * np.sin(5 * x2) + 0.5 * x3 * np.exp(-0.1 * (x1**2 + x2**2))
-    y2 = np.where(x1 > 0, x1 + 0.3 * x2 - 0.5 * x3, 2 * x1 - x2 + 0.7 * np.abs(x3))
-    y3 = x1**2 / 4 + x2**2 / 9 - x3**2 / 16 + 0.2 * x1 * x2 * x3
-    y4 = float(torch.erf(torch.tensor(0.5 * x1))) + np.cos(3 * x2 + 0.5 * x3)
-    y5 = np.where(x3 > 1, np.exp(0.3 * (x1 + x2)), np.log1p(np.abs(x1 - x2)))
-    r = np.sqrt(x1**2 + x2**2 + x3**2)
-    y6 = 2 * np.exp(-0.2 * r**2) + 0.5 * np.exp(-0.05 * (r - 5)**2)
-    y7 = 3.9 * x1 * (1 - x1 / 5) * np.sin(x2) + 0.1 * np.mod(x3, 2.5)
-    threshold = np.sin(x1 + x2) + np.cos(x2 + x3)
-    y8 = np.where(threshold > 0.5,
-                 1.5 * x1 - 0.8 * x2 + 0.3 * x3**2,
-                 -0.5 * x1 + 1.2 * np.sqrt(np.abs(x2)) + 0.4 * x3)
-    return np.array([y1, y2, y3, y4, y5, y6, y7, y8])
-
 # def target_function(x: np.ndarray) -> np.ndarray:
-#     return [
-#         np.sin(x[0]) + np.cos(x[1]) + 0.5 * x[2] + np.random.normal(0, 0.1) for _ in range(8)
-#     ]
+#     x1, x2, x3 = x
+#     y1 = x1**2 * np.sin(5 * x2) + 0.5 * x3 * np.exp(-0.1 * (x1**2 + x2**2))
+#     y2 = np.where(x1 > 0, x1 + 0.3 * x2 - 0.5 * x3, 2 * x1 - x2 + 0.7 * np.abs(x3))
+#     y3 = x1**2 / 4 + x2**2 / 9 - x3**2 / 16 + 0.2 * x1 * x2 * x3
+#     y4 = float(torch.erf(torch.tensor(0.5 * x1))) + np.cos(3 * x2 + 0.5 * x3)
+#     y5 = np.where(x3 > 1, np.exp(0.3 * (x1 + x2)), np.log1p(np.abs(x1 - x2)))
+#     r = np.sqrt(x1**2 + x2**2 + x3**2)
+#     y6 = 2 * np.exp(-0.2 * r**2) + 0.5 * np.exp(-0.05 * (r - 5)**2)
+#     y7 = 3.9 * x1 * (1 - x1 / 5) * np.sin(x2) + 0.1 * np.mod(x3, 2.5)
+#     threshold = np.sin(x1 + x2) + np.cos(x2 + x3)
+#     y8 = np.where(threshold > 0.5,
+#                  1.5 * x1 - 0.8 * x2 + 0.3 * x3**2,
+#                  -0.5 * x1 + 1.2 * np.sqrt(np.abs(x2)) + 0.4 * x3)
+#     return np.array([y1, y2, y3, y4, y5, y6, y7, y8])
+
+def target_function(x: np.ndarray) -> np.ndarray:
+    return [
+        np.sin(x[0]) + np.cos(x[1]) + 0.5 * x[2] + np.random.normal(0, 0.1) for _ in range(8)
+    ]
 
 def main():
     st.title("Bayesian Optimization")
-    n_iter = st.sidebar.number_input("Number of iterations", 10, 1000, 100, 10)
+    n_iter = st.sidebar.number_input("Number of iterations", 10, 10000, 100, 10)
     acquisition = st.sidebar.selectbox("Acquisition function", ["EI", "UCB"])
     seed = st.sidebar.number_input("Random seed", value=0)
 
