@@ -33,7 +33,7 @@ class BaseBayesianOptimizer:
         self._initialize_samples()
 
     def _initialize_samples(self):
-        while len(self.X) < 5:
+        while len(self.X) < 1:
             x = self.rng.uniform(self.bounds[:, 0], self.bounds[:, 1])
             y = self._safe_eval(x)
             if np.isfinite(y).all():

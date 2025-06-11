@@ -660,7 +660,7 @@ def MPM_simulation(n, eta, sigma_y, xmlData):
 
 
 
-def run_optimization(n_iterations, xmlData):
+def run_optimization(n_iterations, csv_file):
     print("Running optimization...")
 
     optimizer = MultiTaskBayesianOptimizer(
@@ -674,13 +674,19 @@ def run_optimization(n_iterations, xmlData):
     )
 
     start_time = time.time()
-    history = optimizer.optimize(n_iter=n_iterations)
+    save_result(optimizer.history, filename=csv_file)
+
+    for _ in range(n_iterations):
+        optimizer.optimize(n_iter=1)         
+        save_result(optimizer.history, filename=csv_file)
+
+
     optimization_time = time.time() - start_time
 
     print(f"Optimization completed in {optimization_time:.2f} seconds.")
-    save_result(history)
+    save_result(optimizer.history, filename=csv_file)
     
-    return history
+    return optimizer.history
     
 
 def save_result(history, filename="optimization_results.csv"):
@@ -695,10 +701,6 @@ def save_result(history, filename="optimization_results.csv"):
     for i in range(8):
         df[f'x_{i+1:02d}'] = history['Y'][:, i]
     
-    
-    best_values = np.max(history['best_values'], axis=0)
-    for i in range(8):
-        df[f'best_x_{i+1:02d}'] = best_values[i]
     
     df.to_csv(filename, index=False)
     print(f"Results saved to {filename}")
@@ -718,7 +720,11 @@ if __name__ == "__main__":
     width = 3.9
     height = 6.8
     
-    run_optimization(n_iterations=10, xmlData=xmlData)
+    n_iterations = 10
+
+    csv_file = f'setup_{height}_{width}_iterations_{n_iterations}.csv'
+
+    run_optimization(n_iterations=10, csv_file=csv_file)
     
     gui.close()
     ti.reset()
