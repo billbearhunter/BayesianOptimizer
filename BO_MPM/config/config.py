@@ -13,7 +13,7 @@ MIN_HEIGHT = 2.0
 MAX_HEIGHT = 7.0
 
 # XML template path
-XML_TEMPLATE_PATH = "BO_MPM\config\setting.xml"
+XML_TEMPLATE_PATH = "config/setting.xml"
 
 # Output configuration
-DEFAULT_OUTPUT_DIR = "BO_MPM\results"
+DEFAULT_OUTPUT_DIR = "/results"
