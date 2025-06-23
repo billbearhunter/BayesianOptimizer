@@ -25,7 +25,7 @@ from scipy.optimize import minimize
 from ipywidgets import interact, IntSlider
 import streamlit as st
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cpu)
 # ti.init(arch=ti.cuda)
 process = psutil.Process(os.getpid())
 

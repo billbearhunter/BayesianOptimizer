@@ -7,6 +7,7 @@ from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA
 
 # ti.init(arch=ti.gpu, offline_cache=True)
 ti.init(arch=ti.cpu, offline_cache=True)
+gui = ti.GUI("AGTaichiMPM")
 
 class MPMSimulator:
     def __init__(self, xml_config_path):
@@ -68,24 +69,32 @@ class MPMSimulator:
         
         while self.agtaichi_mpm.py_num_saved_frames <= self.agtaichi_mpm.py_max_frames:
             # Execute multiple time steps
-            for _ in range(100):
-                self.agtaichi_mpm.step()
-                time = self.agtaichi_mpm.ti_iteration[None] * self.agtaichi_mpm.py_dt
-                
-                # Save frame data
-                if time * self.agtaichi_mpm.py_fps >= self.agtaichi_mpm.py_num_saved_frames:
-                    particle_data = self._get_particle_positions()
-                    if self.agtaichi_mpm.py_num_saved_frames == 0:    
-                        x_0frame = np.max(particle_data[:, 0])
-                    elif self.agtaichi_mpm.py_num_saved_frames > 0:
-                        x_diff = np.max(particle_data[:, 0]) - x_0frame
-                        x_diffs.append(x_diff)
+            while gui.running and not gui.get_event(gui.ESCAPE):
+                for _ in range(100):
+                    self.agtaichi_mpm.step()
+                    time = self.agtaichi_mpm.ti_iteration[None] * self.agtaichi_mpm.py_dt
                     
-                    self.agtaichi_mpm.py_num_saved_frames += 1
-            
-            # Check termination condition
-            if self.agtaichi_mpm.py_num_saved_frames > self.agtaichi_mpm.py_max_frames:
-                break
+                    # Save frame data
+                    if time * self.agtaichi_mpm.py_fps >= self.agtaichi_mpm.py_num_saved_frames:
+                        particle_data = self._get_particle_positions()
+                        if self.agtaichi_mpm.py_num_saved_frames == 0:    
+                            x_0frame = np.max(particle_data[:, 0])
+                        elif self.agtaichi_mpm.py_num_saved_frames > 0:
+                            x_diff = np.max(particle_data[:, 0]) - x_0frame
+                            x_diffs.append(x_diff)
+                        
+                        self.agtaichi_mpm.py_num_saved_frames += 1
+
+                    # memory_usage = process.memory_info().rss / 1024 ** 2
+                    # print(f"memory used: {memory_usage:.2f} MB")
+
+                    # pos = agtaichiMPM.ti_particle_x.to_numpy() / 20 + 0.3
+                    # gui.circles(T(pos), radius=2, color=0xFFFFFF)
+                    # gui.show()
+                
+                # Check termination condition
+                if self.agtaichi_mpm.py_num_saved_frames > self.agtaichi_mpm.py_max_frames:
+                    break
                 
         gc.collect()
         return np.array(x_diffs)
@@ -213,27 +222,27 @@ class AGTaichiMPM:
 
         # staticBox_X = ti.field(float, ())
         # staticBox_X.from_numpy(width)
-        # self.changeSetUpDataKernel_Box0(xmlData.staticBoxList[0].min[0], xmlData.staticBoxList[0].min[1], xmlData.staticBoxList[0].min[2], xmlData.staticBoxList[0].max[0], xmlData.staticBoxList[0].max[1], xmlData.staticBoxList[0].max[2], int(xmlData.staticBoxList[0].isSticky))
-        # self.changeSetUpDataKernel_Box1(xmlData.staticBoxList[1].min[0], xmlData.staticBoxList[1].min[1], xmlData.staticBoxList[1].min[2], xmlData.staticBoxList[1].max[0], xmlData.staticBoxList[1].max[1], xmlData.staticBoxList[1].max[2], int(xmlData.staticBoxList[1].isSticky))
-        # self.changeSetUpDataKernel_Box2(xmlData.staticBoxList[2].min[0], xmlData.staticBoxList[2].min[1], xmlData.staticBoxList[2].min[2], xmlData.staticBoxList[2].max[0], xmlData.staticBoxList[2].max[1], xmlData.staticBoxList[2].max[2], int(xmlData.staticBoxList[2].isSticky))
-        # self.changeSetUpDataKernel_Box3(xmlData.staticBoxList[3].min[0], xmlData.staticBoxList[3].min[1], xmlData.staticBoxList[3].min[2], xmlData.staticBoxList[3].max[0], xmlData.staticBoxList[3].max[1], xmlData.staticBoxList[3].max[2], int(xmlData.staticBoxList[3].isSticky))
-        for i, box in enumerate(xmlData.staticBoxList):
-            self.changeSetUpDataKernel(i, box.min[0], box.min[1], box.min[2], 
-                                    box.max[0], box.max[1], box.max[2], int(box.isSticky))
+        self.changeSetUpDataKernel_Box0(xmlData.staticBoxList[0].min[0], xmlData.staticBoxList[0].min[1], xmlData.staticBoxList[0].min[2], xmlData.staticBoxList[0].max[0], xmlData.staticBoxList[0].max[1], xmlData.staticBoxList[0].max[2], int(xmlData.staticBoxList[0].isSticky))
+        self.changeSetUpDataKernel_Box1(xmlData.staticBoxList[1].min[0], xmlData.staticBoxList[1].min[1], xmlData.staticBoxList[1].min[2], xmlData.staticBoxList[1].max[0], xmlData.staticBoxList[1].max[1], xmlData.staticBoxList[1].max[2], int(xmlData.staticBoxList[1].isSticky))
+        self.changeSetUpDataKernel_Box2(xmlData.staticBoxList[2].min[0], xmlData.staticBoxList[2].min[1], xmlData.staticBoxList[2].min[2], xmlData.staticBoxList[2].max[0], xmlData.staticBoxList[2].max[1], xmlData.staticBoxList[2].max[2], int(xmlData.staticBoxList[2].isSticky))
+        self.changeSetUpDataKernel_Box3(xmlData.staticBoxList[3].min[0], xmlData.staticBoxList[3].min[1], xmlData.staticBoxList[3].min[2], xmlData.staticBoxList[3].max[0], xmlData.staticBoxList[3].max[1], xmlData.staticBoxList[3].max[2], int(xmlData.staticBoxList[3].isSticky))
+        # for i, box in enumerate(xmlData.staticBoxList):
+        #     self.changeSetUpDataKernel(i, box.min[0], box.min[1], box.min[2], 
+        #                             box.max[0], box.max[1], box.max[2], int(box.isSticky))
 
 
-    @ti.kernel
-    def changeSetUpDataKernel(self, box_idx: ti.i32, min_x: ti.f32, min_y: ti.f32, min_z: ti.f32, 
-                            max_x: ti.f32, max_y: ti.f32, max_z: ti.f32, isSticky: ti.i32):
-        """Configure static box parameters"""
-        if box_idx < self.ti_num_boxes[None]:
-            self.ti_static_box_min[box_idx][0] = min_x
-            self.ti_static_box_min[box_idx][1] = min_y
-            self.ti_static_box_min[box_idx][2] = min_z
-            self.ti_static_box_max[box_idx][0] = max_x
-            self.ti_static_box_max[box_idx][1] = max_y
-            self.ti_static_box_max[box_idx][2] = max_z
-            self.ti_static_box_type[box_idx] = isSticky
+    # @ti.kernel
+    # def changeSetUpDataKernel(self, box_idx: ti.i32, min_x: ti.f32, min_y: ti.f32, min_z: ti.f32, 
+    #                         max_x: ti.f32, max_y: ti.f32, max_z: ti.f32, isSticky: ti.i32):
+    #     """Configure static box parameters"""
+    #     if box_idx < self.ti_num_boxes[None]:
+    #         self.ti_static_box_min[box_idx][0] = min_x
+    #         self.ti_static_box_min[box_idx][1] = min_y
+    #         self.ti_static_box_min[box_idx][2] = min_z
+    #         self.ti_static_box_max[box_idx][0] = max_x
+    #         self.ti_static_box_max[box_idx][1] = max_y
+    #         self.ti_static_box_max[box_idx][2] = max_z
+    #         self.ti_static_box_type[box_idx] = isSticky
 
     @ti.kernel
     def changeSetUpDataKernel_Box0(self, box_0_min_x: ti.f32, box_0_min_y: ti.f32, box_0_min_z: ti.f32, box_0_max_x: ti.f32, box_0_max_y: ti.f32, box_0_max_z: ti.f32, isSticky: ti.i32):
