@@ -84,7 +84,7 @@ class MPMSimulator:
                 self.agtaichiMPM.step()
                 time = self.agtaichiMPM.ti_iteration[None] * self.agtaichiMPM.py_dt
 
-                if time * self.agtaichi_mpm.py_fps >= self.agtaichi_mpm.py_num_saved_frames:
+                if time * self.agtaichiMPM.py_fps >= self.agtaichiMPM.py_num_saved_frames:
                     particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
                     p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float32)
                     np.delete(p_x, particle_is_inner_of_box_id,axis=0)
