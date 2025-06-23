@@ -1,6 +1,6 @@
 import os
 from simulation.taichi import MPMSimulator
-from optimization.bayesian import BayesianOptimizer
+from optimization.Bayesian import BayesianOptimizer
 from config.config import XML_TEMPLATE_PATH, DEFAULT_OUTPUT_DIR
 
 def run_optimization(width, height, sampling_number, seed, output_dir=DEFAULT_OUTPUT_DIR):

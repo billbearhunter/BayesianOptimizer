@@ -100,9 +100,9 @@ class MPMSimulator:
                     # memory_usage = process.memory_info().rss / 1024 ** 2
                     # print(f"memory used: {memory_usage:.2f} MB")
 
-                    pos = self.agtaichiMPM.ti_particle_x.to_numpy() / 20 + 0.3
-                    gui.circles(T(pos), radius=2, color=0xFFFFFF)
-                    gui.show()
+                    # pos = self.agtaichiMPM.ti_particle_x.to_numpy() / 20 + 0.3
+                    # gui.circles(T(pos), radius=2, color=0xFFFFFF)
+                    # gui.show()
 
             if self.agtaichiMPM.py_num_saved_frames > self.agtaichiMPM.py_max_frames:
                 gc.collect()
