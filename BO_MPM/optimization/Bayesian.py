@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import os
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
 from sklearn.multioutput import MultiOutputRegressor
@@ -123,9 +124,19 @@ class BayesianOptimizer:
         ei = (mu - best_y) * norm.cdf(Z) + np.sqrt(var) * norm.pdf(Z)
         return -np.sum(ei)
     
-    def _save_iteration_data(self, iteration, n, eta, sigma_y, displacements, sim_time):
-        """Save iteration data to file"""
-        data = [n, eta, sigma_y, *displacements, sim_time]
-        # Append to main results file
-        with open(f"{self.output_dir}/optimization_results.csv", 'a') as f:
-            f.write(','.join(map(str, data)) + '\n')
+def _save_iteration_data(self, iteration, n, eta, sigma_y, displacements, sim_time):
+    """Save iteration data to file with headers"""
+    # Create header string and data list (excluding sim_time)
+    header = "n,eta,sigma_y,x_01,x_02,x_03,x_04,x_05,x_06,x_07,x_08"
+    data = [n, eta, sigma_y, *displacements]  # Removed sim_time
+    
+    file_path = f"{self.output_dir}/optimization_results.csv"
+    
+    # Write header only if file doesn't exist or is empty
+    if not os.path.exists(file_path) or os.stat(file_path).st_size == 0:
+        with open(file_path, 'w') as f:
+            f.write(header + '\n')
+    
+    # Always append data
+    with open(file_path, 'a') as f:
+        f.write(','.join(map(str, data)) + '\n')

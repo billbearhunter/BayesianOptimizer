@@ -6,7 +6,7 @@ from .file_ops import FileOperations
 from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA_Y, MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT
 
 # ti.init(arch=ti.gpu, offline_cache=True)
-ti.init(arch=ti.cpu, offline_cache=True)
+ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
 gui = ti.GUI("AGTaichiMPM")
 
 class MPMSimulator:
@@ -65,8 +65,7 @@ class MPMSimulator:
     def _execute_simulation_loop(self):
         """Execute simulation main loop"""
         x_diffs = []
-        x_0frame = 0
-        
+        x_0frame = 0.0    
         self.agtaichiMPM.py_num_saved_frames = 0
 
 
@@ -85,8 +84,8 @@ class MPMSimulator:
                 time = self.agtaichiMPM.ti_iteration[None] * self.agtaichiMPM.py_dt
 
                 if time * self.agtaichiMPM.py_fps >= self.agtaichiMPM.py_num_saved_frames:
-                    particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
-                    p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float32)
+                    particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
+                    p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float64)
                     np.delete(p_x, particle_is_inner_of_box_id,axis=0)
                     if self.agtaichiMPM.py_num_saved_frames == 0 :    
                         x_0frame = np.max(p_x[:, 0])
@@ -109,7 +108,7 @@ class MPMSimulator:
                 gc.collect()
                 break 
 
-        return np.array(x_diffs)
+        return np.array(x_diffs, dtype=np.float64)
     
     # def _get_particle_positions(self):
     #     """Get particle position data (optimized memory usage)"""
@@ -214,7 +213,7 @@ class AGTaichiMPM:
         self.ti_particle_count[None] = np.prod(self.ti_particle_ndcount.to_numpy())
         # print('ti_particle_count: ', self.ti_particle_count[None])
         self.ti_particle_is_inner_of_box = ti.field(int, self.ti_particle_count[None])
-        self.ti_particle_x = ti.Vector.field(3, float, self.ti_particle_count[None])
+        self.ti_particle_x = ti.Vector.field(3, ti.f64, self.ti_particle_count[None])
         self.ti_particle_v = ti.Vector.field(3, float, self.ti_particle_count[None])
         self.ti_particle_be = ti.Matrix.field(3, 3, float, self.ti_particle_count[None])
         self.ti_particle_C = ti.Matrix.field(3, 3, float, self.ti_particle_count[None])
