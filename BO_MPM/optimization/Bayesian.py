@@ -60,7 +60,7 @@ class BayesianOptimizer:
         print(f"Starting Bayesian optimization with {sampling_number} samples")
         
         # Generate initial design points
-        self._initialize_data(seed, min(5, sampling_number))
+        self._initialize_data(seed, 1)
         
         # Optimization loop
         start_time = time.time()
