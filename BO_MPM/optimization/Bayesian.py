@@ -5,7 +5,7 @@ from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
 from sklearn.multioutput import MultiOutputRegressor
 from scipy.stats import norm
 from scipy.optimize import minimize
-from config import *
+from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA_Y, MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT
 from simulation.file_ops import FileOperations
 
 class BayesianOptimizer:
@@ -25,6 +25,8 @@ class BayesianOptimizer:
         n = np.random.uniform(MIN_N, MAX_N)
         eta = np.random.uniform(MIN_ETA, MAX_ETA)
         sigma_y = np.random.uniform(MIN_SIGMA_Y, MAX_SIGMA_Y)
+
+        print(f"Initial parameters: n={n:.4f}, eta={eta:.4f}, σ_y={sigma_y:.4f}")
         
         # Run initial simulation
         start_time = time.time()
