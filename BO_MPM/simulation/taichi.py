@@ -13,14 +13,14 @@ class MPMSimulator:
     def __init__(self, xml_config_path):
         self.xml_data = MPMXMLData(xml_config_path)
         self.file_ops = FileOperations()
-        self.agtaichi_mpm = self._initialize_mpm()
+        self.agtaichiMPM = self._initialize_mpm()
         
     def _initialize_mpm(self):
         """Create and initialize MPM instance"""
-        agtaichi_mpm = AGTaichiMPM(self.xml_data)
-        agtaichi_mpm.changeSetUpData(self.xml_data)
-        agtaichi_mpm.initialize()
-        return agtaichi_mpm
+        agtaichiMPM = AGTaichiMPM(self.xml_data)
+        agtaichiMPM.changeSetUpData(self.xml_data)
+        agtaichiMPM.initialize()
+        return agtaichiMPM
     
     def configure_geometry(self, width, height):
         """Configure geometry parameters"""
@@ -33,7 +33,7 @@ class MPMSimulator:
         self.xml_data.cuboidData.max = new_max_value
         self.xml_data.staticBoxList[2].max[0] = width
         self.xml_data.staticBoxList[3].max[0] = width
-        self.agtaichi_mpm.changeSetUpData(self.xml_data)
+        self.agtaichiMPM.changeSetUpData(self.xml_data)
         
     def run_simulation(self, n, eta, sigma_y):
         """Run a single simulation and return displacement results"""
@@ -46,9 +46,9 @@ class MPMSimulator:
         self.xml_data.integratorData.yield_stress = sigma_y
         
         # Reset simulator
-        self.agtaichi_mpm.changeSetUpData(self.xml_data)
-        self.agtaichi_mpm.initialize()
-        self.agtaichi_mpm.py_num_saved_frames = 0
+        self.agtaichiMPM.changeSetUpData(self.xml_data)
+        self.agtaichiMPM.initialize()
+        self.agtaichiMPM.py_num_saved_frames = 0
         
         # Execute simulation
         return self._execute_simulation_loop()
@@ -67,49 +67,61 @@ class MPMSimulator:
         x_diffs = []
         x_0frame = 0
         
-        while self.agtaichi_mpm.py_num_saved_frames <= self.agtaichi_mpm.py_max_frames:
-            # Execute multiple time steps
-            while gui.running and not gui.get_event(gui.ESCAPE):
-                for _ in range(100):
-                    self.agtaichi_mpm.step()
-                    time = self.agtaichi_mpm.ti_iteration[None] * self.agtaichi_mpm.py_dt
-                    
-                    # Save frame data
-                    if time * self.agtaichi_mpm.py_fps >= self.agtaichi_mpm.py_num_saved_frames:
-                        particle_data = self._get_particle_positions()
-                        if self.agtaichi_mpm.py_num_saved_frames == 0:    
-                            x_0frame = np.max(particle_data[:, 0])
-                        elif self.agtaichi_mpm.py_num_saved_frames > 0:
-                            x_diff = np.max(particle_data[:, 0]) - x_0frame
-                            x_diffs.append(x_diff)
-                        
-                        self.agtaichi_mpm.py_num_saved_frames += 1
+        self.agtaichiMPM.py_num_saved_frames = 0
+
+
+        # os.makedirs(output_dir, exist_ok=True)
+            
+        print('*** Parameters ***')
+        print('  herschel_bulkley_power: ' + str(self.agtaichiMPM.ti_hb_n[None]))
+        print('  eta: ' + str(self.agtaichiMPM.ti_hb_eta[None]))
+        print('  yield_stress: ' + str(self.agtaichiMPM.ti_hb_sigmaY[None]))
+        # print('  setup width: ' + str(xmlData.cuboidData.max[0]))
+        # print('  setup height: ' + str(xmlData.cuboidData.max[1]))
+
+        while gui.running and not gui.get_event(gui.ESCAPE):
+            for i in range(100):              
+                self.agtaichiMPM.step()
+                time = self.agtaichiMPM.ti_iteration[None] * self.agtaichiMPM.py_dt
+
+                if time * self.agtaichi_mpm.py_fps >= self.agtaichi_mpm.py_num_saved_frames:
+                    particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
+                    p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float32)
+                    np.delete(p_x, particle_is_inner_of_box_id,axis=0)
+                    if self.agtaichiMPM.py_num_saved_frames == 0 :    
+                        x_0frame = np.max(p_x[:, 0])
+                        print('max x position: ', x_0frame)
+                    elif self.agtaichiMPM.py_num_saved_frames > 0:
+                        x_diff = np.max(p_x[:, 0]) - x_0frame
+                        x_diffs.append(x_diff)
+
+                    print("frame: ", self.agtaichiMPM.py_num_saved_frames)
+                    self.agtaichiMPM.py_num_saved_frames += 1
 
                     # memory_usage = process.memory_info().rss / 1024 ** 2
                     # print(f"memory used: {memory_usage:.2f} MB")
 
-                    # pos = agtaichiMPM.ti_particle_x.to_numpy() / 20 + 0.3
-                    # gui.circles(T(pos), radius=2, color=0xFFFFFF)
-                    # gui.show()
-                
-                # Check termination condition
-                if self.agtaichi_mpm.py_num_saved_frames > self.agtaichi_mpm.py_max_frames:
-                    break
-                
-        gc.collect()
+                    pos = self.agtaichiMPM.ti_particle_x.to_numpy() / 20 + 0.3
+                    gui.circles(T(pos), radius=2, color=0xFFFFFF)
+                    gui.show()
+
+            if self.agtaichiMPM.py_num_saved_frames > self.agtaichiMPM.py_max_frames:
+                gc.collect()
+                break 
+
         return np.array(x_diffs)
     
-    def _get_particle_positions(self):
-        """Get particle position data (optimized memory usage)"""
-        particle_is_inner = self.agtaichi_mpm.ti_particle_is_inner_of_box.to_numpy()[
-            0:self.agtaichi_mpm.ti_particle_count[None]].astype(np.int32) == 1
-        p_x = self.agtaichi_mpm.ti_particle_x.to_numpy()[
-            0:self.agtaichi_mpm.ti_particle_count[None]].astype(np.float32)
-        return p_x[~particle_is_inner]
+    # def _get_particle_positions(self):
+    #     """Get particle position data (optimized memory usage)"""
+    #     particle_is_inner = self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[
+    #         0:self.agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1
+    #     p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[
+    #         0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float32)
+    #     return p_x[~particle_is_inner]
     
     def cleanup(self):
         """Clean up resources"""
-        self.agtaichi_mpm.cleanup()
+        self.agtaichiMPM.cleanup()
         ti.reset()
 
 
