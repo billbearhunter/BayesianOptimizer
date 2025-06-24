@@ -9,6 +9,7 @@ from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA
 ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
 gui = ti.GUI("AGTaichiMPM")
 
+@ti.data_oriented
 class MPMSimulator:
     def __init__(self, xml_config_path):
         self.xml_data = MPMXMLData(xml_config_path)
@@ -64,13 +65,6 @@ class MPMSimulator:
     
     def _execute_simulation_loop(self):
         """Execute simulation main loop"""
-        x_diffs = []
-        x_0frame = 0.0    
-        self.agtaichiMPM.py_num_saved_frames = 0
-
-
-        # os.makedirs(output_dir, exist_ok=True)
-            
         print('*** Parameters ***')
         print('  herschel_bulkley_power: ' + str(self.agtaichiMPM.ti_hb_n[None]))
         print('  eta: ' + str(self.agtaichiMPM.ti_hb_eta[None]))
@@ -78,6 +72,13 @@ class MPMSimulator:
         # print('  setup width: ' + str(xmlData.cuboidData.max[0]))
         # print('  setup height: ' + str(xmlData.cuboidData.max[1]))
 
+
+        x_diffs = []
+        x_0frame = 0.0    
+        self.agtaichiMPM.py_num_saved_frames = 0
+
+        # os.makedirs(output_dir, exist_ok=True)
+            
         while gui.running and not gui.get_event(gui.ESCAPE):
             for i in range(100):              
                 self.agtaichiMPM.step()
@@ -110,13 +111,6 @@ class MPMSimulator:
 
         return np.array(x_diffs, dtype=np.float64)
     
-    # def _get_particle_positions(self):
-    #     """Get particle position data (optimized memory usage)"""
-    #     particle_is_inner = self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[
-    #         0:self.agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1
-    #     p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[
-    #         0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float32)
-    #     return p_x[~particle_is_inner]
     
     def cleanup(self):
         """Clean up resources"""

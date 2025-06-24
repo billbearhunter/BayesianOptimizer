@@ -106,8 +106,9 @@ class BayesianOptimizer:
             EI, 
             bounds=self.bounds_tensor,
             q=1, 
-            num_restarts=10,
-            raw_samples=512,
+            num_restarts=5,
+            raw_samples=128,
+            options={"batch_limit": 5}  # Optional: limit batch size for each restart
         )
         return candidate[0].cpu().numpy()
     
