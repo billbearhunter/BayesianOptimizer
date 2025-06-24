@@ -359,29 +359,27 @@ class AGTaichiMPM:
     @ti.kernel
     def compute_displacements(self):
         """Compute displacements of particles and store the maximum x position"""
-        
         particle_count = self.ti_particle_count[None]
-        if particle_count == 0:
-            return
+        frame_idx = self.ti_frame_counter[None]
         
         
         max_x = -1e9
         
         
-        for p in range(particle_count):
-            if self.ti_particle_is_inner_of_box[p] == 0:  
-                if self.ti_particle_x[p][0] > max_x:
-                    max_x = self.ti_particle_x[p][0]
+        if particle_count > 0:
+            
+            for p in range(particle_count):
+                if self.ti_particle_is_inner_of_box[p] == 0: 
+                    if self.ti_particle_x[p][0] > max_x:
+                        max_x = self.ti_particle_x[p][0]
         
-        
-        frame_idx = self.ti_frame_counter[None]
-        
-        
+       
         if frame_idx == 0:
             self.ti_x_0frame[None] = max_x
             self.ti_max_x_diff[None] = 0.0
         
-        elif 1 <= frame_idx <= 8:
+        
+        if frame_idx >= 1 and frame_idx <= 8:
             
             self.ti_max_x_diff[None] = max_x - self.ti_x_0frame[None]
             
