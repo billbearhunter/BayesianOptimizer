@@ -1,12 +1,15 @@
 import os
 import torch
 import numpy as np
+import taichi as ti
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.acquisition import ExpectedImprovement
 from botorch.optim import optimize_acqf
 from scipy.stats import qmc
+
+ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 class BayesianOptimizer:
     def __init__(self, simulator, bounds, output_dir, max_iter):
@@ -24,7 +27,7 @@ class BayesianOptimizer:
         self.bounds_tensor = torch.tensor([
             [b[0] for b in bounds],
             [b[1] for b in bounds]
-        ], dtype=torch.float64)
+        ], dtype=torch.float32)
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         self.max_iter = max_iter
@@ -39,22 +42,22 @@ class BayesianOptimizer:
         
     def _init_results_file(self):
         """Initialize results file with header"""
-        headers = ["n", "eta", "sigma_y"] + [f"x_{i:02d}" for i in range(1, 9)]
+        headers = ["n", "eta", "sigma_y", "width", "height"] + [f"x_{0}{i+1}" for i in range(8)]
         with open(self.results_file, 'w') as f:
             f.write(",".join(headers) + "\n")
             
     def _save_iteration_data(self, params, displacements):
         """Save data for one iteration"""
-        n, eta, sigma_y = params
+        n, eta, sigma_y, width, height = params
         # Ensure exactly 8 displacement values
         disp_list = list(displacements[:8]) if len(displacements) >= 8 else list(displacements) + [0.0]*(8-len(displacements))
-        row = [n, eta, sigma_y] + disp_list
+        row = [n, eta, sigma_y, width, height] + disp_list
         with open(self.results_file, 'a') as f:
-            f.write(",".join([f"{v:.16e}" for v in row]) + "\n")
+            f.write(",".join([f"{v:.16f}" for v in row]) + "\n")
         
     def collect_initial_points(self):
         """Collect Initial Points (5 points using LHS)"""
-        sampler = qmc.LatinHypercube(d=3)
+        sampler = qmc.LatinHypercube(d=5)
         sample = sampler.random(n=1)
         mins = [b[0] for b in self.bounds]
         maxs = [b[1] for b in self.bounds]
@@ -70,7 +73,10 @@ class BayesianOptimizer:
         Returns:
             displacements: Array of 8 displacement values
         """
-        n, eta, sigma_y = params
+        n, eta, sigma_y, width, height = params
+
+        self.simulator.configure_geometry(width, height)
+
         displacements = self.simulator.run_simulation(n, eta, sigma_y)
         
         # Handle invalid results
@@ -149,7 +155,7 @@ class BayesianOptimizer:
             self.displacements.append(displacements)
             self._save_iteration_data(new_params, displacements)
             
-            print(f"New point: n={new_params[0]:.3f}, eta={new_params[1]:.3f}, sigma_y={new_params[2]:.3f}")
+            print(f"New point: n={new_params[0]:.3f}, eta={new_params[1]:.3f}, sigma_y={new_params[2]:.3f}, width={new_params[3]:.3f}, height={new_params[4]:.3f}")
         
         # 6. Return best result
         best_params, best_displacements = self.return_best_result()

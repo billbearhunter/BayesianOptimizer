@@ -8,8 +8,8 @@ def main():
     
     # Optimization command
     optimize_parser = subparsers.add_parser('optimize', help='Run parameter optimization')
-    optimize_parser.add_argument('--width', type=float, default=3.9, help='Container width')
-    optimize_parser.add_argument('--height', type=float, default=6.8, help='Container height')
+    # optimize_parser.add_argument('--width', type=float, default=3.9, help='Container width')
+    # optimize_parser.add_argument('--height', type=float, default=6.8, help='Container height')
     optimize_parser.add_argument('--samples', type=int, default=100, help='Number of samples')
     optimize_parser.add_argument('--seed', type=int, default=42, help='Random seed')
     optimize_parser.add_argument('--output', type=str, default='results', help='Output directory')
@@ -22,8 +22,8 @@ def main():
     
     if args.command == 'optimize':
         run_optimization(
-            width=args.width,
-            height=args.height,
+            # width=args.width,
+            # height=args.height,
             sampling_number=args.samples,
             seed=args.seed,
             output_dir=args.output

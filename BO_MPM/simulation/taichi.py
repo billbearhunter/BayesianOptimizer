@@ -6,10 +6,9 @@ from .xmlParser import MPMXMLData
 from .file_ops import FileOperations
 from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA_Y, MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT
 
-os.environ['TI_HEADLESS'] = '1'
 
-ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
-# ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
+# ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+# ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 gui = ti.GUI("AGTaichiMPM")
 
 @ti.data_oriented
@@ -89,7 +88,7 @@ class MPMSimulator:
 
                 if time * self.agtaichiMPM.py_fps >= self.agtaichiMPM.py_num_saved_frames:
                     # particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
-                    # p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float64)
+                    # p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float32)
                     # np.delete(p_x, particle_is_inner_of_box_id,axis=0)
                     # if self.agtaichiMPM.py_num_saved_frames == 0 :    
                     #     x_0frame = np.max(p_x[:, 0])
@@ -135,7 +134,7 @@ class MPMSimulator:
         
         x_diffs = self.agtaichiMPM.ti_x_diffs.to_numpy()[:8]
 
-        return np.array(x_diffs, dtype=np.float64)
+        return np.array(x_diffs, dtype=np.float32)
     
     
     def cleanup(self):
@@ -148,8 +147,8 @@ class MPMSimulator:
 class AGTaichiMPM:
     
     def __init__(self, xmlData):  
-        self.ti_max_x_diff = ti.field(ti.f64, ())  
-        self.ti_x_0frame = ti.field(ti.f64, ())     
+        self.ti_max_x_diff = ti.field(ti.f32, ())  
+        self.ti_x_0frame = ti.field(ti.f32, ())     
         self.ti_frame_counter = ti.field(ti.i32, ())  
         
         self.ti_hb_n = ti.field(float, ())
@@ -189,7 +188,7 @@ class AGTaichiMPM:
         self.py_max_frames = xmlData.integratorData.max_frames
         self.py_num_saved_frames = 0
         print('py_max_frames: ', self.py_max_frames)
-        self.ti_x_diffs = ti.field(ti.f64, self.py_max_frames)
+        self.ti_x_diffs = ti.field(ti.f32, self.py_max_frames)
 
         # configuring grid by using the specified grid center and cell width as is
         # min and max will be recomputed because the specified grid size may not agree with the specified cell width
@@ -238,7 +237,7 @@ class AGTaichiMPM:
         self.ti_particle_count[None] = np.prod(self.ti_particle_ndcount.to_numpy())
         # print('ti_particle_count: ', self.ti_particle_count[None])
         self.ti_particle_is_inner_of_box = ti.field(int, self.ti_particle_count[None])
-        self.ti_particle_x = ti.Vector.field(3, ti.f64, self.ti_particle_count[None])
+        self.ti_particle_x = ti.Vector.field(3, ti.f32, self.ti_particle_count[None])
         self.ti_particle_v = ti.Vector.field(3, float, self.ti_particle_count[None])
         self.ti_particle_be = ti.Matrix.field(3, 3, float, self.ti_particle_count[None])
         self.ti_particle_C = ti.Matrix.field(3, 3, float, self.ti_particle_count[None])
