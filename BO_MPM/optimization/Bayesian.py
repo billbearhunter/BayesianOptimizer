@@ -9,7 +9,8 @@ from botorch.acquisition import ExpectedImprovement
 from botorch.optim import optimize_acqf
 from scipy.stats import qmc
 
-ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+# ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 class BayesianOptimizer:
     def __init__(self, simulator, bounds, output_dir, max_iter):
