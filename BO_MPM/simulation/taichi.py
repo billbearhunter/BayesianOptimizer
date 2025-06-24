@@ -1,12 +1,15 @@
 import taichi as ti
+import os
 import numpy as np
 import gc
 from .xmlParser import MPMXMLData
 from .file_ops import FileOperations
 from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA_Y, MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT
 
-# ti.init(arch=ti.gpu, offline_cache=True)
-ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
+os.environ['TI_HEADLESS'] = '1'
+
+ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
+# ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f64, default_ip=ti.i32)
 gui = ti.GUI("AGTaichiMPM")
 
 @ti.data_oriented
@@ -73,11 +76,11 @@ class MPMSimulator:
         # print('  setup height: ' + str(xmlData.cuboidData.max[1]))
 
 
-        x_diffs = []
-        x_0frame = 0.0    
-        self.agtaichiMPM.py_num_saved_frames = 0
+        # x_diffs = []
+        # x_0frame = 0.0    
+        # self.agtaichiMPM.py_num_saved_frames = 0
 
-        # os.makedirs(output_dir, exist_ok=True)
+        # # os.makedirs(output_dir, exist_ok=True)
             
         while gui.running and not gui.get_event(gui.ESCAPE):
             for i in range(100):              
@@ -85,15 +88,17 @@ class MPMSimulator:
                 time = self.agtaichiMPM.ti_iteration[None] * self.agtaichiMPM.py_dt
 
                 if time * self.agtaichiMPM.py_fps >= self.agtaichiMPM.py_num_saved_frames:
-                    particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
-                    p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float64)
-                    np.delete(p_x, particle_is_inner_of_box_id,axis=0)
-                    if self.agtaichiMPM.py_num_saved_frames == 0 :    
-                        x_0frame = np.max(p_x[:, 0])
-                        print('max x position: ', x_0frame)
-                    elif self.agtaichiMPM.py_num_saved_frames > 0:
-                        x_diff = np.max(p_x[:, 0]) - x_0frame
-                        x_diffs.append(x_diff)
+                    # particle_is_inner_of_box_id = np.where(self.agtaichiMPM.ti_particle_is_inner_of_box.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.int32) == 1)
+                    # p_x = self.agtaichiMPM.ti_particle_x.to_numpy()[0:self.agtaichiMPM.ti_particle_count[None]].astype(np.float64)
+                    # np.delete(p_x, particle_is_inner_of_box_id,axis=0)
+                    # if self.agtaichiMPM.py_num_saved_frames == 0 :    
+                    #     x_0frame = np.max(p_x[:, 0])
+                    #     print('max x position: ', x_0frame)
+                    # elif self.agtaichiMPM.py_num_saved_frames > 0:
+                    #     x_diff = np.max(p_x[:, 0]) - x_0frame
+                    #     x_diffs.append(x_diff)
+
+                    self.agtaichiMPM.compute_displacements()
 
                     print("frame: ", self.agtaichiMPM.py_num_saved_frames)
                     self.agtaichiMPM.py_num_saved_frames += 1
@@ -109,6 +114,27 @@ class MPMSimulator:
                 gc.collect()
                 break 
 
+        # self.agtaichiMPM.ti_frame_counter[None] = 0
+        
+        
+        # while self.agtaichiMPM.py_num_saved_frames <= self.agtaichiMPM.py_max_frames:
+        #     for i in range(100):
+        #         self.agtaichiMPM.step()
+        #         time = self.agtaichiMPM.ti_iteration[None] * self.agtaichiMPM.py_dt
+                
+        #         if time * self.agtaichiMPM.py_fps >= self.agtaichiMPM.py_num_saved_frames:
+                    
+        #             self.agtaichiMPM.compute_displacements()
+                    
+        #             print(f"frame: {self.agtaichiMPM.py_num_saved_frames}")
+        #             self.agtaichiMPM.py_num_saved_frames += 1
+            
+        #     if self.agtaichiMPM.py_num_saved_frames > self.agtaichiMPM.py_max_frames:
+        #         gc.collect()
+        #         break
+        
+        x_diffs = self.agtaichiMPM.ti_x_diffs.to_numpy()[:8]
+
         return np.array(x_diffs, dtype=np.float64)
     
     
@@ -121,7 +147,11 @@ class MPMSimulator:
 @ti.data_oriented
 class AGTaichiMPM:
     
-    def __init__(self, xmlData):      
+    def __init__(self, xmlData):  
+        self.ti_max_x_diff = ti.field(ti.f64, ())  
+        self.ti_x_0frame = ti.field(ti.f64, ())     
+        self.ti_frame_counter = ti.field(ti.i32, ())  
+        
         self.ti_hb_n = ti.field(float, ())
         self.ti_hb_eta = ti.field(float, ())
         self.ti_hb_sigmaY = ti.field(float, ())
@@ -159,6 +189,7 @@ class AGTaichiMPM:
         self.py_max_frames = xmlData.integratorData.max_frames
         self.py_num_saved_frames = 0
         print('py_max_frames: ', self.py_max_frames)
+        self.ti_x_diffs = ti.field(ti.f64, self.py_max_frames)
 
         # configuring grid by using the specified grid center and cell width as is
         # min and max will be recomputed because the specified grid size may not agree with the specified cell width
@@ -325,6 +356,41 @@ class AGTaichiMPM:
         self.changeSetUpDataKernel_Box2(xmlData.staticBoxList[2].min[0], xmlData.staticBoxList[2].min[1], xmlData.staticBoxList[2].min[2], xmlData.staticBoxList[2].max[0], xmlData.staticBoxList[2].max[1], xmlData.staticBoxList[2].max[2], int(xmlData.staticBoxList[2].isSticky))
         self.changeSetUpDataKernel_Box3(xmlData.staticBoxList[3].min[0], xmlData.staticBoxList[3].min[1], xmlData.staticBoxList[3].min[2], xmlData.staticBoxList[3].max[0], xmlData.staticBoxList[3].max[1], xmlData.staticBoxList[3].max[2], int(xmlData.staticBoxList[3].isSticky))
 
+    @ti.kernel
+    def compute_displacements(self):
+        """Compute displacements of particles and store the maximum x position"""
+        
+        particle_count = self.ti_particle_count[None]
+        if particle_count == 0:
+            return
+        
+        
+        max_x = -1e9
+        
+        
+        for p in range(particle_count):
+            if self.ti_particle_is_inner_of_box[p] == 0:  
+                if self.ti_particle_x[p][0] > max_x:
+                    max_x = self.ti_particle_x[p][0]
+        
+        
+        frame_idx = self.ti_frame_counter[None]
+        
+        
+        if frame_idx == 0:
+            self.ti_x_0frame[None] = max_x
+            self.ti_max_x_diff[None] = 0.0
+        
+        elif 1 <= frame_idx <= 8:
+            
+            self.ti_max_x_diff[None] = max_x - self.ti_x_0frame[None]
+            
+            
+            self.ti_x_diffs[frame_idx - 1] = self.ti_max_x_diff[None]
+        
+        
+        self.ti_frame_counter[None] += 1
+
     def cleanup(self):
         """Explicitly release Taichi resources"""
         # Manually release large memory fields
@@ -341,6 +407,13 @@ class AGTaichiMPM:
     @ti.kernel
     def initialize(self):
         self.ti_iteration[None] = 0
+
+        self.ti_max_x_diff[None] = 0.0
+        self.ti_x_0frame[None] = 0.0
+        for i in range(self.ti_x_diffs.shape[0]):
+            self.ti_x_diffs[i] = 0.0
+        self.ti_frame_counter[None] = 0
+
         # clear grid values
         for I in ti.grouped(self.ti_grid_m):
             self.ti_grid_m[I] = 0.0

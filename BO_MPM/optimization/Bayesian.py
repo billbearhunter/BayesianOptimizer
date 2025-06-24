@@ -24,7 +24,7 @@ class BayesianOptimizer:
         self.bounds_tensor = torch.tensor([
             [b[0] for b in bounds],
             [b[1] for b in bounds]
-        ], dtype=torch.float32)
+        ], dtype=torch.float64)
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         self.max_iter = max_iter
@@ -50,12 +50,12 @@ class BayesianOptimizer:
         disp_list = list(displacements[:8]) if len(displacements) >= 8 else list(displacements) + [0.0]*(8-len(displacements))
         row = [n, eta, sigma_y] + disp_list
         with open(self.results_file, 'a') as f:
-            f.write(",".join(map(str, row)) + "\n")
+            f.write(",".join([f"{v:.16e}" for v in row]) + "\n")
         
     def collect_initial_points(self):
         """Collect Initial Points (5 points using LHS)"""
         sampler = qmc.LatinHypercube(d=3)
-        sample = sampler.random(n=5)
+        sample = sampler.random(n=1)
         mins = [b[0] for b in self.bounds]
         maxs = [b[1] for b in self.bounds]
         return qmc.scale(sample, mins, maxs)

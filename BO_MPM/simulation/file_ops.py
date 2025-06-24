@@ -23,12 +23,12 @@ class FileOperations:
         
         with open(csv_path, 'a', newline='') as csv_file:
             writer = csv.writer(csv_file)
-            writer.writerow(data)
-            
-        
+            writer.writerow([f"{v:.16e}" for v in data])
+
+
         with open(dat_path, 'a') as dat_file:
-            dat_file.write(' '.join(map(str, data)) + '\n')
-            
+            dat_file.write(' '.join([f"{v:.16e}" for v in data]) + '\n')
+
         return csv_path, dat_path
     
 
