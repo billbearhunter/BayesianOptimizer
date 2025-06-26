@@ -17,7 +17,7 @@ def min_max_scale(tensor, min_val, max_val):
     return (tensor - min_val) / (max_val - min_val + 1e-8) * (max_val - min_val) + min_val
 
 class BayesianOptimizer:
-    def __init__(self, simulator, bounds, output_dir, max_iter):
+    def __init__(self, simulator, bounds, output_dir, max_iter, device=None):
         """
         Bayesian Optimizer strictly following the flowchart
         
@@ -26,7 +26,12 @@ class BayesianOptimizer:
             bounds: Parameter bounds as [(min_n, max_n), (min_eta, max_eta), (min_sigma_y, max_sigma_y)]
             output_dir: Output directory for results
             max_iter: Maximum optimization iterations
+            device: torch.device to use (default: GPU if available)
         """
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
+        print(f"Using device: {self.device}")
 
         self.simulator = simulator
         self.bounds = bounds
@@ -44,15 +49,15 @@ class BayesianOptimizer:
         ]
 
         # Create min and max tensors for scaling
-        self.param_min = torch.tensor([b[0] for b in self.bounds], dtype=torch.float64)
-        self.param_max = torch.tensor([b[1] for b in self.bounds], dtype=torch.float64)
+        self.param_min = torch.tensor([b[0] for b in self.bounds], dtype=torch.float64, device=self.device)
+        self.param_max = torch.tensor([b[1] for b in self.bounds], dtype=torch.float64, device=self.device)
         self.param_range = self.param_max - self.param_min
 
         # Create scaled bounds tensor
         self.scaled_bounds = torch.tensor([
             [0.0, 0.0, 0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0, 1.0, 1.0]
-        ], dtype=torch.float64)
+        ], dtype=torch.float64, device=self.device)
         
         self.bounds_tensor = torch.tensor([
             [b[0] for b in bounds],
@@ -130,8 +135,8 @@ class BayesianOptimizer:
         # Compute average displacement as target value
         Y = [np.mean(d) for d in self.displacements]
         
-        X_tensor = torch.tensor(self.X, dtype=torch.float64)
-        Y_tensor = torch.tensor(Y, dtype=torch.float64).unsqueeze(-1)
+        X_tensor = torch.tensor(self.X, dtype=torch.float64, device=self.device)
+        Y_tensor = torch.tensor(Y, dtype=torch.float64, device=self.device).unsqueeze(-1)
         
         gp = SingleTaskGP(X_tensor, Y_tensor)
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
@@ -179,7 +184,7 @@ class BayesianOptimizer:
             self.displacements.append(displacements)
             
             # Convert to tensor and scale to unit cube
-            param_tensor = torch.tensor(params, dtype=torch.float64)
+            param_tensor = torch.tensor(params, dtype=torch.float64, device=self.device)
             scaled_params = self.scale_to_unit_cube(param_tensor)
             self.X_scaled.append(scaled_params)
             
