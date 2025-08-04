@@ -10,9 +10,9 @@ def main():
     optimize_parser = subparsers.add_parser('optimize', help='Run parameter optimization')
     # optimize_parser.add_argument('--width', type=float, default=3.9, help='Container width')
     # optimize_parser.add_argument('--height', type=float, default=6.8, help='Container height')
-    optimize_parser.add_argument('--evals', type=int, default=100, help='Total number of evaluations.')
-    optimize_parser.add_argument('--init_points', type=int, default=20, help='Number of initial LHS points.')
-    optimize_parser.add_argument('--batch_size', type=int, default=4, help='Number of parallel evaluations per batch (q).')
+    optimize_parser.add_argument('--evals', type=int, default=50000, help='Total number of evaluations.')
+    optimize_parser.add_argument('--init_points', type=int, default=5, help='Number of initial LHS points.')
+    optimize_parser.add_argument('--batch_size', type=int, default=5, help='Number of parallel evaluations per batch (q).')
     optimize_parser.add_argument('--seed', type=int, default=42, help='Random seed')
     optimize_parser.add_argument('--output', type=str, default='results', help='Output directory')
     

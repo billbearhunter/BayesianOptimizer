@@ -28,7 +28,7 @@ def run_optimization(total_evaluations, n_initial_points, batch_size, seed, outp
 
     simulator = MPMSimulator(XML_TEMPLATE_PATH)
     
-    bounds = [
+    bounds_list = [
         (MIN_N, MAX_N),
         (MIN_ETA, MAX_ETA),
         (MIN_SIGMA_Y, MAX_SIGMA_Y),
@@ -39,7 +39,7 @@ def run_optimization(total_evaluations, n_initial_points, batch_size, seed, outp
     try:
         optimizer = BayesianOptimizer(
             simulator=simulator,
-            bounds=bounds,
+            bounds_list=bounds_list,
             output_dir=output_dir,
             n_initial_points=n_initial_points,
             n_batches=n_batches,

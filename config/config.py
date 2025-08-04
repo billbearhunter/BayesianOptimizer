@@ -3,7 +3,7 @@ MIN_ETA = 0.001
 MAX_ETA = 300.0
 MIN_N = 0.3
 MAX_N = 1.0
-MIN_SIGMA_Y = 0.0
+MIN_SIGMA_Y = 0.001
 MAX_SIGMA_Y = 400.0
 
 # Geometry ranges
