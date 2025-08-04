@@ -14,7 +14,7 @@ from config.config import XML_TEMPLATE_PATH, DEFAULT_OUTPUT_DIR, MIN_N, MAX_N, M
 ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 def min_max_scale(tensor, min_val, max_val):
-    return (tensor - min_val) / (max_val - min_val + 1e-8) * (max_val - min_val) + min_val
+    return (tensor - min_val) / (max_val - min_val + 1e-8)
 
 class BayesianOptimizer:
     def __init__(self, simulator, bounds, output_dir, max_iter, device=None):
