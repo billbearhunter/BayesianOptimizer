@@ -6,6 +6,8 @@ from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.acquisition import ExpectedImprovement
+from botorch.acquisition.monte_carlo import qExpectedImprovement
+from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.optim import optimize_acqf
 from scipy.stats import qmc
 from config.config import XML_TEMPLATE_PATH, DEFAULT_OUTPUT_DIR, MIN_N, MAX_N, MIN_ETA, MAX_ETA, MIN_SIGMA_Y, MAX_SIGMA_Y,MAX_HEIGHT, MIN_HEIGHT, MAX_WIDTH, MIN_WIDTH
@@ -14,19 +16,22 @@ from config.config import XML_TEMPLATE_PATH, DEFAULT_OUTPUT_DIR, MIN_N, MAX_N, M
 ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 def min_max_scale(tensor, min_val, max_val):
-    return (tensor - min_val) / (max_val - min_val + 1e-8) * (max_val - min_val) + min_val
+    return (tensor - min_val) / (max_val - min_val + 1e-8)
+    # return (tensor - min_val) / (max_val - min_val + 1e-8) * (max_val - min_val) + min_val
 
 class BayesianOptimizer:
-    def __init__(self, simulator, bounds, output_dir, max_iter, device=None):
+    def __init__(self, simulator, bounds, output_dir, n_initial_points, n_batches, batch_size, device=None):
         """
-        Bayesian Optimizer strictly following the flowchart
+        Bayesian Optimizer for batch optimization.
         
         Args:
-            simulator: MPM simulator instance
-            bounds: Parameter bounds as [(min_n, max_n), (min_eta, max_eta), (min_sigma_y, max_sigma_y)]
-            output_dir: Output directory for results
-            max_iter: Maximum optimization iterations
-            device: torch.device to use (default: GPU if available)
+            simulator: MPM simulator instance.
+            bounds: Parameter bounds.
+            output_dir: Output directory.
+            n_initial_points: Number of initial points for LHS.
+            n_batches: Number of optimization batches to run.
+            batch_size: Number of points to evaluate in each batch (q).
+            device: torch.device to use.
         """
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,7 +42,11 @@ class BayesianOptimizer:
         self.bounds = bounds
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-        self.max_iter = max_iter
+        # self.max_iter = max_iter
+
+        self.n_initial_points = n_initial_points
+        self.n_batches = n_batches
+        self.batch_size = batch_size # This is 'q'
 
         # Define parameter bounds using config values
         self.bounds = [
@@ -144,21 +153,25 @@ class BayesianOptimizer:
         return gp
     
     def optimize_acquisition_function(self, gp):
-        """Optimize Acquisition Function in scaled space"""
-        # Get best average displacement
-        best_Y = max([np.mean(d) for d in self.displacements])
-        EI = ExpectedImprovement(gp, best_Y)
+        """Optimize Acquisition Function in scaled space using qEI."""
+        # Find the best observed value (incumbent)
+        # Note: BoTorch maximizes, so if you want to minimize, negate your objective function values (Y)
+        best_Y = gp.train_targets.max()
         
-        # Optimize in scaled space
-        candidate, _ = optimize_acqf(
-            EI, 
+        # Use q-Expected Improvement for batch optimization
+        qEI = qExpectedImprovement(gp, best_Y)
+        
+        # Optimize in the scaled space [0, 1]^d
+        candidate, acq_value = optimize_acqf(
+            acq_function=qEI, 
             bounds=self.scaled_bounds,
-            q=1, 
-            num_restarts=5,
-            raw_samples=128,
-            options={"batch_limit": 5}
+            q=self.batch_size, # <-- Use the batch size here
+            num_restarts=10,   # Increase restarts for better exploration
+            raw_samples=512,  # Increase raw samples for better exploration
+            options={"batch_limit": 5, "maxiter": 200}
         )
-        return candidate[0]
+        # candidate is now a tensor of shape (q, d)
+        return candidate
     
     def return_best_result(self):
         """Return Best Result"""
@@ -191,30 +204,50 @@ class BayesianOptimizer:
             # Save iteration data
             self._save_iteration_data(params, displacements)
             
-        # Optimization loop
-        for i in range(self.max_iter):
-            print(f"Iteration {i+1}/{self.max_iter}")
+    # Optimization loop
+    def optimize(self):
+        """Execute the batch optimization workflow."""
+        print("Starting optimization...")
+        
+        # 1. Generate and evaluate initial points
+        initial_points = self.collect_initial_points()
+        for params in initial_points:
+            displacements = self.run_simulation(params)
+            self.X.append(params)
+            self.displacements.append(displacements)
             
-            # 3. Fit GP Model using scaled parameters
+            param_tensor = torch.tensor(params, dtype=torch.float64, device=self.device)
+            scaled_params = self.scale_to_unit_cube(param_tensor)
+            self.X_scaled.append(scaled_params)
+            self._save_iteration_data(params, displacements)
+
+        # Optimization loop runs for n_batches
+        for i in range(self.n_batches):
+            print(f"Batch {i+1}/{self.n_batches}")
+            
+            # 3. Fit GP Model using all available data
             gp = self.fit_gp_model()
             
-            # 4. Optimize Acquisition Function in scaled space
-            new_params_scaled = self.optimize_acquisition_function(gp)
+            # 4. Optimize Acquisition Function to get a batch of new candidates
+            new_params_scaled_batch = self.optimize_acquisition_function(gp)
             
-            # 5. Convert back to original space and run simulation
-            new_params_orig = self.scale_from_unit_cube(new_params_scaled)
-            displacements = self.run_simulation(new_params_orig.numpy())
-            
-            # Store results
-            self.X.append(new_params_orig.numpy())
-            self.X_scaled.append(new_params_scaled)
-            self.displacements.append(displacements)
-            self._save_iteration_data(new_params_orig.numpy(), displacements)
-            
-            # Print new point with all parameters
-            print(f"New point: n={new_params_orig[0]:.3f}, eta={new_params_orig[1]:.3f}, "
-                  f"sigma_y={new_params_orig[2]:.3f}, width={new_params_orig[3]:.3f}, "
-                  f"height={new_params_orig[4]:.3f}")
+            # 5. Evaluate the batch of candidates
+            # !!! This is the ideal place for parallel execution of your simulator !!!
+            for new_params_scaled in new_params_scaled_batch:
+                new_params_orig = self.scale_from_unit_cube(new_params_scaled)
+                params_numpy = new_params_orig.cpu().numpy()
+                
+                displacements = self.run_simulation(params_numpy)
+                
+                # Store results for this point
+                self.X.append(params_numpy)
+                self.X_scaled.append(new_params_scaled)
+                self.displacements.append(displacements)
+                self._save_iteration_data(params_numpy, displacements)
+
+                print(f"  New point: n={params_numpy[0]:.3f}, eta={params_numpy[1]:.3f}, "
+                      f"sigma_y={params_numpy[2]:.3f}, width={params_numpy[3]:.3f}, "
+                      f"height={params_numpy[4]:.3f}")
         
         # 6. Return best result
         best_params, best_displacements = self.return_best_result()
