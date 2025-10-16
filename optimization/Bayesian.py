@@ -2,6 +2,7 @@ import os
 import torch
 import numpy as np
 import taichi as ti
+import joblib  # Imported joblib
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -55,7 +56,7 @@ class BayesianOptimizer:
         
     def _init_results_file(self):
         """Initialize results file with header"""
-        headers = ["n", "eta", "sigma_y", "width", "height"] + [f"disp_{i+1}" for i in range(8)]
+        headers = ["n", "eta", "sigma_y", "width", "height"] + [f"x_0{i+1}" for i in range(8)]
         with open(self.results_file, 'w') as f:
             f.write(",".join(headers) + "\n")
             
@@ -154,6 +155,12 @@ class BayesianOptimizer:
             # 3. Fit GP Model
             gp = self.fit_gp_model()
             print(f"Learned Lengthscale: {gp.covar_module.lengthscale.detach().cpu().numpy()}")
+
+            # --- Save the trained GP model using joblib ---
+            model_filename = os.path.join(self.output_dir, f'gp_model_batch_{i+1}.joblib')
+            joblib.dump(gp, model_filename)
+            print(f"Saved GP model to {model_filename}")
+            # ------------------------------------------------
 
             # 4. Optimize acquisition function to get a batch of new candidates
             new_X_scaled_batch = self.optimize_acquisition_function(gp)
