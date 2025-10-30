@@ -13,21 +13,22 @@ from botorch.models.transforms.outcome import Standardize
 from botorch.utils.transforms import unnormalize
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf
-from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.acquisition.objective import LinearMCObjective
+from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
 
-# Project config (parameter ranges, paths). Keep import path consistent with run_optimization.py
+
 from config.config import (
     MIN_N, MAX_N, MIN_ETA, MAX_ETA, MIN_SIGMA_Y, MAX_SIGMA_Y,
     MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT,
     DEFAULT_OUTPUT_DIR,
 )
 
-# Initialize Taichi (GPU if available)
+# ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 
-def _unit_bounds(d: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Return [0,1]^d bounds as a (2, d) tensor for BoTorch optimize_acqf."""
+def _unit_bounds(d: int, device, dtype):
+    """Return [0,1]^d bounds tensor for optimize_acqf."""
     lb = torch.zeros(d, dtype=dtype, device=device)
     ub = torch.ones(d, dtype=dtype, device=device)
     return torch.stack([lb, ub], dim=0)
@@ -44,30 +45,24 @@ class SumPosteriorVariance(AcquisitionFunction):
         super().__init__(model)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # X shapes: (q, d) or (b, q, d). Convert to (b, q, d).
-        if X.dim() == 2:
-            X = X.unsqueeze(0)  # -> (1, q, d)
         posterior = self.model.posterior(X)
-        # posterior.variance shape: (*fantasy_batch, b, q, m) or (b, q, m)
-        var = posterior.variance
-        # Sum over outputs (m) then over q
-        summed = var.sum(dim=-1).sum(dim=-1)  # -> (*fantasy_batch, b)
-        # If there are fantasy batch dims, average them away to get (b,)
-        while summed.dim() > 1:
-            summed = summed.mean(dim=0)
-        return summed  # (b,)
+        var = posterior.variance  # (..., q, 8)
+        # Sum over outputs and q, average over fantasy batch dims if any.
+        while var.dim() > 2:
+            var = var.mean(dim=0)
+        return var.sum(dim=-1)
 
 
 class BayesianOptimizer:
-    """LHS → 8-output GP → MaxVar active learning with sequential q-batch fantasization.
+    """LHS → 8-output GP → Linear objective (mean of 8) → sequential qNEI.
 
-    - Inputs are normalized to [0,1]^d for modeling / selection.
+    - Inputs normalized to [0,1]^d.
     - Initial design via Latin Hypercube Sampling (LHS).
-    - Model: SingleTaskGP with Standardize(m=8) outcome transform (independent outputs).
-    - Acquisition: Sum of posterior variances (higher = more uncertain).
-    - q-batch: greedy one-by-one with `model.fantasize(...)` after each pick.
-    - No Sobol fallback is used (robustness ensured by >= 2 initial points + scalar acq).
+    - Model: SingleTaskGP with Standardize(m=8) (independent outputs).
+    - Acquisition: qNoisyExpectedImprovement with LinearMCObjective (mean over 8 outputs).
+    - q-batch: Sequential greedy with fantasization (X_pending) to avoid clustering.
     """
+
     def __init__(
         self,
         simulator,
@@ -94,7 +89,10 @@ class BayesianOptimizer:
         # Original-scale bounds (2, d) then infer d and min initial points
         self.bounds = torch.tensor(bounds_list, dtype=self.dtype, device=self.device).t()
         self.d = self.bounds.shape[1]
-        self.n_initial_points = max(n_initial_points, max(2, self.d))  # >= max(2, d)
+        self.n_initial_points = max(n_initial_points, max(2, self.d))  # >= max(2,d)
+
+        # Unit cube bounds for acquisition
+        self.unit_bounds = _unit_bounds(self.d, self.device, self.dtype)
 
         # Training datasets: normalized X in [0,1]^d, raw Y in R^8
         self.train_X = torch.empty((0, self.d), dtype=self.dtype, device=self.device)   # N x d
@@ -108,29 +106,17 @@ class BayesianOptimizer:
     def _init_results_file(self):
         headers = ["n", "eta", "sigma_y", "width", "height"] + [f"x_{i+1:02d}" for i in range(8)]
         with open(self.results_file, "w") as f:
-            f.write(",".join(headers) + "\n")
+            f.write(",".join(headers) + "")
 
     def _save_iteration_data(self, params_numpy: np.ndarray, displacements_numpy: np.ndarray):
         row = params_numpy.tolist() + displacements_numpy.tolist()
         with open(self.results_file, "a") as f:
-            f.write(",".join([f"{v:.16f}" for v in row]) + "\n")
+            f.write(",".join([f"{v:.16f}" for v in row]) + "")
 
-    # ------------------------------ Design & sim -----------------------------
-    def collect_initial_points(self) -> torch.Tensor:
-        """Generate n_initial_points LHS samples in [0,1]^d."""
-        n = self.n_initial_points
-        print(f"Generating {n} initial points via Latin Hypercube in [0,1]^{self.d} ...")
-        sampler = qmc.LatinHypercube(d=self.d)
-        X_scaled = sampler.random(n=n)  # (n, d) in [0,1]
-        return torch.tensor(X_scaled, dtype=self.dtype, device=self.device)
-
+    # ------------------------------ Simulation ------------------------------
     def run_simulation(self, params_numpy: np.ndarray) -> np.ndarray:
-        """Call external simulator and return 8D displacement vector (numpy).
-
-        Any invalid/NaN response is replaced by zeros for robustness.
-        """
+        """Run Taichi simulator and return 8 displacements (kept as original)."""
         n, eta, sigma_y, width, height = params_numpy
-        # Width/height define geometry for the simulator
         self.simulator.configure_geometry(width, height)
         displacements = self.simulator.run_simulation(n, eta, sigma_y)
 
@@ -145,99 +131,120 @@ class BayesianOptimizer:
 
     # ------------------------------ Modeling ---------------------------------
     def _fit_gp_8out(self) -> SingleTaskGP:
-        """Fit an 8-output GP (independent outputs, shared X) with Standardize(m=8)."""
-        gp = SingleTaskGP(self.train_X, self.train_Y, outcome_transform=Standardize(m=8))
-        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        model = SingleTaskGP(
+            train_X=self.train_X,
+            train_Y=self.train_Y,
+            outcome_transform=Standardize(m=8),
+        )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
-        return gp
+        return model
 
-    # ------------------------------ Acquisition ------------------------------
+    # ------------------------------ Acquisition (Route A) --------------------
     def _select_q_by_maxvar(self, model: SingleTaskGP, q: int) -> torch.Tensor:
-        """Greedy selection of q points in [0,1]^d using MaxVar with fantasization."""
+        """
+        Sequential-greedy selection of q points in [0,1]^d using qNEI
+        with a linear objective equal to the mean of 8 outputs.
+        """
         unit_bounds = _unit_bounds(self.d, self.device, self.dtype)
-        chosen = []
-        fantasy_model = model
-        fantasy_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([128]))
 
-        for j in range(q):
-            acq = SumPosteriorVariance(fantasy_model)
-            candidate, acq_val = optimize_acqf(
-                acq_function=acq,
+        weights = torch.ones(8, dtype=self.dtype, device=self.device) / 8.0
+        objective = LinearMCObjective(weights=weights)
+
+        X_pending = None
+        selected = []
+        for _ in range(q):
+            acqf = qNoisyExpectedImprovement(
+                model=model,
+                X_baseline=self.train_X,
+                objective=objective,
+                X_pending=X_pending,
+                prune_baseline=True,
+                num_fantasies=32,
+                cache_root=True,
+            )
+            cand, _ = optimize_acqf(
+                acqf,
                 bounds=unit_bounds,
-                q=1,                         # pick one at a time
+                q=1,
                 num_restarts=10,
-                raw_samples=1024,
+                raw_samples=256,
                 options={"batch_limit": 5, "maxiter": 200},
             )
-            cand = candidate.view(-1, self.d).detach()  # (1, d)
-            chosen.append(cand)
+            cand = cand.detach()
+            selected.append(cand)
+            X_pending = cand if X_pending is None else torch.cat([X_pending, cand], dim=0)
 
-            # Safe logging of acquisition values (avoid .item() on tensors with dims)
-            try:
-                v = acq_val
-                msg = float(v.mean()) if hasattr(v, "mean") else float(v)
-                print(f"  Picked #{j+1} with acquisition ≈ {msg:.6f}")
-            except Exception:
-                print(f"  Picked #{j+1}")
-
-            # Kriging Believer: condition on posterior mean at the picked point
-            with torch.no_grad():
-                post = fantasy_model.posterior(cand)      # mean shape (1, m)
-                y_belief = post.mean.detach()              # (1, m)
-                fantasy_model = fantasy_model.condition_on_observations(
-                    X=cand, Y=y_belief
-                )
-
-        return torch.cat(chosen, dim=0)  # (q, d)
+        return torch.cat(selected, dim=0)  # (q, d)
 
     # ------------------------------ Workflow ---------------------------------
     def optimize(self):
-        """Main loop: LHS → evaluate → fit GP → repeat(q-batch MaxVar → evaluate → refit)."""
-        print("Starting optimization: LHS → GP(8) → MaxVar (sequential q-batch)")
+        """
+        Main loop: LHS → evaluate → fit GP → repeat(sequential qNEI → evaluate → refit).
+        """
+        print("Starting optimization: LHS → GP(8) → Sequential qNEI (linear mean objective) → Sequential Evaluation")
 
         # 1) Initial LHS design (normalized) and evaluation
-        X0 = self.collect_initial_points()  # (n0, d)
-        print(f"Evaluating {self.n_initial_points} initial points ...")
-        for x_scaled in X0:
-            x_scaled = x_scaled.view(1, -1)
-            x_orig = unnormalize(x_scaled, bounds=self.bounds).squeeze(0).cpu().numpy()
-            y = self.run_simulation(x_orig)  # (8,)
-            # append
-            self.train_X = torch.cat([self.train_X, x_scaled], dim=0)
-            self.train_Y = torch.cat([self.train_Y, torch.tensor(y, dtype=self.dtype, device=self.device).view(1, -1)], dim=0)
-            self._save_iteration_data(x_orig, y)
+        d = self.d
+        lhs = qmc.LatinHypercube(d=d)
+        X0_unit = torch.tensor(lhs.random(self.n_initial_points), dtype=self.dtype, device=self.device)
 
-        # 2) Iterations: fit GP, select q by MaxVar, evaluate, augment data
+        # Evaluate initial points
+        Y0 = []
+        for i in range(self.n_initial_points):
+            x_unit = X0_unit[i]
+            x_orig = unnormalize(x_unit.unsqueeze(0), bounds=self.bounds).squeeze(0).cpu().numpy()
+            y_vals = self.run_simulation(x_orig)
+            Y0.append(y_vals)
+            self._save_iteration_data(x_orig, y_vals)
+
+        Y0_t = torch.tensor(np.array(Y0), dtype=self.dtype, device=self.device)
+        self.train_X = torch.cat([self.train_X, X0_unit], dim=0)
+        self.train_Y = torch.cat([self.train_Y, Y0_t], dim=0)
+
+        # 2) Iterations: fit GP, select q by qNEI, evaluate, augment data
         for b in range(self.n_batches):
-            print(f"\n--- Batch {b+1}/{self.n_batches} ---")
-            # Fit GP on all data so far
+            print(f"=== Batch {b+1}/{self.n_batches} ===")
             model = self._fit_gp_8out()
 
-            # Greedy-build a q-batch in [0,1]^d using fantasization
-            q = self.batch_size
-            X_batch = self._select_q_by_maxvar(model, q=q)  # (q, d)
+            # Select a batch of q points in unit space
+            X_batch = self._select_q_by_maxvar(model, q=self.batch_size)  # (q, d)
 
-            # Evaluate the selected batch
-            for j in range(X_batch.shape[0]):
-                x_scaled = X_batch[j:j+1, :]  # (1, d)
-                x_orig = unnormalize(x_scaled, bounds=self.bounds).squeeze(0).cpu().numpy()
-                y = self.run_simulation(x_orig)
-                # append
-                self.train_X = torch.cat([self.train_X, x_scaled], dim=0)
-                self.train_Y = torch.cat([self.train_Y, torch.tensor(y, dtype=self.dtype, device=self.device).view(1, -1)], dim=0)
-                self._save_iteration_data(x_orig, y)
-                print(f"  Evaluated {j+1}/{q}: n={x_orig[0]:.6f}, eta={x_orig[1]:.6f}, sigma_y={x_orig[2]:.6f}, "
-                      f"width={x_orig[3]:.6f}, height={x_orig[4]:.6f}")
+            # Evaluate batch sequentially (simulator is often stateful / expensive)
+            X_batch_orig = unnormalize(X_batch, bounds=self.bounds)
+            Y_batch = []
+            for j in range(self.batch_size):
+                x_orig_np = X_batch_orig[j].cpu().numpy()
+                y_np = self.run_simulation(x_orig_np)
+                Y_batch.append(y_np)
+                self._save_iteration_data(x_orig_np, y_np)
 
-        # 3) Choose a "best" point for compatibility (max average of 8 outputs)
-        avg_disp = self.train_Y.mean(dim=1)  # (N,)
+            # Append
+            Y_batch_t = torch.tensor(np.array(Y_batch), dtype=self.dtype, device=self.device)
+            self.train_X = torch.cat([self.train_X, X_batch], dim=0)
+            self.train_Y = torch.cat([self.train_Y, Y_batch_t], dim=0)
+
+            # Progress report by the average over 8 outputs
+            avg_now = self.train_Y.mean(dim=1)
+            best_idx = int(torch.argmax(avg_now).item())
+            best_params = unnormalize(self.train_X[best_idx:best_idx+1, :], bounds=self.bounds).squeeze(0).cpu().numpy()
+            print(
+                f"Current best avg: {float(avg_now[best_idx]):.6f} at "
+                f"n={best_params[0]:.6f}, eta={best_params[1]:.6f}, sigma_y={best_params[2]:.6f}, "
+                f"width={best_params[3]:.6f}, height={best_params[4]:.6f}"
+            )
+
+        # Final best (by mean over 8 outputs)
+        avg_disp = self.train_Y.mean(dim=1)
         best_idx = int(torch.argmax(avg_disp).item())
         best_params_orig = unnormalize(self.train_X[best_idx:best_idx+1, :], bounds=self.bounds).squeeze(0).cpu().numpy()
         best_displacements = self.train_Y[best_idx].detach().cpu().numpy()
 
-        print("\n--- Best Result (by average displacement over 8 outputs) ---")
-        print(f"Params: n={best_params_orig[0]:.6f}, eta={best_params_orig[1]:.6f}, sigma_y={best_params_orig[2]:.6f}, "
-              f"width={best_params_orig[3]:.6f}, height={best_params_orig[4]:.6f}")
+        print("--- Best Result (by average displacement over 8 outputs) ---")
+        print(
+            f"Params: n={best_params_orig[0]:.6f}, eta={best_params_orig[1]:.6f}, "
+            f"sigma_y={best_params_orig[2]:.6f}, width={best_params_orig[3]:.6f}, height={best_params_orig[4]:.6f}"
+        )
         print(f"Average displacement: {float(avg_disp[best_idx]):.6f}")
         print("Optimization completed.")
 
