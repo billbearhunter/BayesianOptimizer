@@ -188,7 +188,7 @@ class BayesianOptimizer:
             model = self._fit_gp_8out()
 
             # Select a q-batch on unit cube
-            X_batch_unit = self._select_q_joint_nei(model, q=self.batch_size)
+            X_batch_unit = self._select_q_joint_ei(model, q=self.batch_size)
 
             # Map back to original bounds for simulation
             X_batch_orig = unnormalize(X_batch_unit, bounds=self.bounds)
