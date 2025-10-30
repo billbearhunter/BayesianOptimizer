@@ -1,7 +1,8 @@
 import os
 import json
 from simulation.taichi import MPMSimulator
-from optimization.Bayesian import BayesianOptimizer
+# from optimization.Bayesian import BayesianOptimizer
+from optimization.Bayesian2 import BayesianOptimizer
 from config.config import XML_TEMPLATE_PATH, DEFAULT_OUTPUT_DIR, MIN_N, MAX_N, MIN_ETA, MAX_ETA, MIN_SIGMA_Y, MAX_SIGMA_Y,MAX_HEIGHT, MIN_HEIGHT, MAX_WIDTH, MIN_WIDTH
 
 

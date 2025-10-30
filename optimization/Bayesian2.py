@@ -7,42 +7,39 @@ from typing import List, Tuple
 from scipy.stats import qmc
 
 # BoTorch / GPyTorch
-from botorch.models.multitask import KroneckerMultiTaskGP  # MTGP for block design (n,d) -> (n,m)
+from botorch.models.multitask import KroneckerMultiTaskGP
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.models.transforms.outcome import Standardize
-from botorch.utils.transforms import unnormalize
+# --- MODIFICATION: Added 'normalize' for prediction ---
+from botorch.utils.transforms import unnormalize, normalize
 from botorch.optim import optimize_acqf
 from botorch.acquisition.objective import LinearMCObjective
-# --- FIX 1: IMPORT THE RECOMMENDED FUNCTION ---
 from botorch.acquisition.logei import qLogExpectedImprovement
 from botorch.sampling.normal import SobolQMCNormalSampler
 
 # Keep your original Taichi init exactly the same
-ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+# ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 
 # ------------------------------ Helpers ------------------------------------
 def _unit_bounds(d: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Return [0,1]^d bounds as a (2, d) tensor for BoTorch optimize_acqf."""
+    """Return [0,1]^d bounds as a (2, d) tensor."""
     lb = torch.zeros(d, dtype=dtype, device=device)
     ub = torch.ones(d, dtype=dtype, device=device)
     return torch.stack([lb, ub], dim=0)
 
 
 class BayesianOptimizer:
-    """LHS → 8-output MTGP (KroneckerMultiTaskGP) → Linear(mean of 8) objective → joint qLogEI.
-
-    This version models the 8 correlated outputs using KroneckerMultiTaskGP (block design),
-    which natively takes train_X: (n, d) and train_Y: (n, 8) and captures task correlations.
+    """
+    LHS → 8-output MTGP (KroneckerMultiTaskGP) → Linear(mean of 8) objective → joint qLogEI.
     
-    FIXED: Swapped qNEI for qLogEI per BoTorch recommendation.
-    FIXED: Corrected SobolQMCNormalSampler argument from 'num_samples' to 'sample_shape'.
+    Includes methods to save, load, and predict with the final GP model.
     """
 
     def __init__(
         self,
-        simulator,
+        simulator,  # Can be None if only loading for prediction
         bounds_list: List[Tuple[float, float]],
         output_dir: str,
         n_initial_points: int,
@@ -62,6 +59,7 @@ class BayesianOptimizer:
         self.output_dir = output_dir or "results_bayes_routeA"
         os.makedirs(self.output_dir, exist_ok=True)
         self.results_file = os.path.join(self.output_dir, "optimization_results.csv")
+        self.model_file = os.path.join(self.output_dir, "final_model_data.pth")
 
         # Search / evaluation settings
         self.n_initial_points = int(n_initial_points)
@@ -80,10 +78,13 @@ class BayesianOptimizer:
         self.train_X = torch.empty((0, self.d), dtype=self.dtype, device=self.device)
         self.train_Y = torch.empty((0, self.n_tasks), dtype=self.dtype, device=self.device)
 
-        self._init_results_file()
+        # Only init results file if simulator is provided (i.e., we are optimizing)
+        if self.simulator is not None:
+            self._init_results_file()
 
     # ------------------------------ I/O helpers ------------------------------
     def _init_results_file(self):
+        """Initializes the CSV results file header."""
         headers = ["n", "eta", "sigma_y", "width", "height"] + [f"x_{i+1:02d}" for i in range(self.n_tasks)]
         with open(self.results_file, "w") as f:
             f.write(",".join(headers) + "\n")
@@ -94,9 +95,90 @@ class BayesianOptimizer:
         with open(self.results_file, "a") as f:
             f.write(",".join([f"{v:.16f}" for v in row]) + "\n")
 
+    # --- NEW METHOD: Save model and data ---
+    def save_model_data(self, model: KroneckerMultiTaskGP):
+        """
+        Saves the model state_dict and training data (train_X, train_Y) to a file.
+        """
+        print(f"Saving model state_dict and training data to {self.model_file}")
+        save_data = {
+            'model_state_dict': model.state_dict(),
+            'train_X': self.train_X,
+            'train_Y': self.train_Y,
+        }
+        torch.save(save_data, self.model_file)
+
+    # --- NEW METHOD: Load model and data ---
+    def load_model_and_data(self) -> KroneckerMultiTaskGP:
+        """
+        Loads model state_dict and training data from the file.
+        
+        This method populates self.train_X and self.train_Y and
+        returns an instantiated model in evaluation mode.
+        """
+        if not os.path.exists(self.model_file):
+            raise FileNotFoundError(f"Model data file not found: {self.model_file}")
+
+        print(f"Loading model and data from {self.model_file}...")
+        data = torch.load(self.model_file, map_location=self.device)
+
+        # 1. Restore training data
+        self.train_X = data['train_X'].to(dtype=self.dtype, device=self.device)
+        self.train_Y = data['train_Y'].to(dtype=self.dtype, device=self.device)
+        print(f"Restored training data: X shape {self.train_X.shape}, Y shape {self.train_Y.shape}")
+
+        # 2. Re-instantiate model structure (must match _fit_gp_8out)
+        model = KroneckerMultiTaskGP(
+            train_X=self.train_X,
+            train_Y=self.train_Y,
+            outcome_transform=Standardize(m=self.n_tasks),
+        )
+
+        # 3. Load saved parameters
+        model.load_state_dict(data['model_state_dict'])
+        
+        # 4. Set to evaluation mode (critical for prediction)
+        model.eval()
+        print("Model successfully loaded and set to evaluation mode.")
+        return model
+
+    # --- NEW METHOD: Predict ---
+    def predict(self, model: KroneckerMultiTaskGP, x_orig_numpy: np.ndarray) -> np.ndarray:
+        """
+        Predicts the 8 outputs (posterior mean) for new inputs.
+        
+        Args:
+            model: The loaded, evaluation-mode GP model.
+            x_orig_numpy: A (n, d) numpy array of parameters in their original range.
+                          
+        Returns:
+            A (n, 8) numpy array of predicted displacements.
+        """
+        model.eval() # Ensure eval mode
+
+        # 1. Convert numpy to tensor
+        x_orig = torch.tensor(x_orig_numpy, dtype=self.dtype, device=self.device)
+        if x_orig.dim() == 1:
+            x_orig = x_orig.unsqueeze(0) # Ensure 2D
+
+        # 2. Normalize inputs from original range to [0,1]
+        x_unit = normalize(x_orig, bounds=self.bounds)
+
+        # 3. Get posterior distribution (no_grad context)
+        with torch.no_grad():
+            posterior = model.posterior(x_unit)
+            # .mean automatically handles un-standardization
+            mean_pred = posterior.mean 
+
+        # 4. Convert back to numpy and return
+        return mean_pred.cpu().numpy()
+
     # ------------------------------ Simulation ------------------------------
     def run_simulation(self, params_numpy: np.ndarray) -> np.ndarray:
-        """Call your Taichi simulator; returns 8 displacements. (UNCHANGED)"""
+        """Call your Taichi simulator; returns 8 displacements."""
+        if self.simulator is None:
+            raise ValueError("Simulator not provided. Cannot run simulation.")
+            
         n, eta, sigma_y, width, height = params_numpy
         self.simulator.configure_geometry(width, height)
         displacements = self.simulator.run_simulation(n, eta, sigma_y)
@@ -114,7 +196,6 @@ class BayesianOptimizer:
     def _fit_gp_8out(self) -> KroneckerMultiTaskGP:
         """
         Fit a KroneckerMultiTaskGP to the 8-output data (block design).
-        (UNCHANGED)
         """
         model = KroneckerMultiTaskGP(
             train_X=self.train_X,                             # (n, d) on unit cube
@@ -127,13 +208,16 @@ class BayesianOptimizer:
 
     # ------------------------------ Acquisition: joint qEI ------------------
     def _select_q_joint_ei(self, model, q: int) -> torch.Tensor:
+        """Selects a batch of q points using qLogExpectedImprovement."""
         
+        # Objective: Average of the 8 outputs
         weights = torch.ones(self.n_tasks, dtype=self.dtype, device=self.device) / self.n_tasks
         objective = LinearMCObjective(weights=weights)
 
-
+        # Sampler for MC integration
         sampler = SobolQMCNormalSampler(sample_shape=torch.Size([256]))
 
+        # Get current best observed (incumbent) value
         if getattr(model, "outcome_transform", None) is not None:
             Y_std = model.outcome_transform(self.train_Y)[0]      
             y_obj_std = Y_std @ weights                           
@@ -142,15 +226,18 @@ class BayesianOptimizer:
             y_obj = (self.train_Y @ weights)
             best_f = y_obj.max()
 
+        # Define the acquisition function
         acqf = qLogExpectedImprovement(
             model=model,
             best_f=best_f,
             sampler=sampler,
             objective=objective,
         )
+        
+        # Optimize the acquisition function
         cands, _ = optimize_acqf(
             acqf,
-            bounds=self.unit_bounds,
+            bounds=self.unit_bounds, # Optimize on [0,1]^d
             q=q,
             num_restarts=8,             
             raw_samples=256,
@@ -161,7 +248,9 @@ class BayesianOptimizer:
 
     # ------------------------------ Main loop --------------------------------
     def optimize(self):
-        print("Starting optimization: LHS → KroneckerMTGP(8) → joint qLogNEI (linear mean objective)")
+        """Run the full Bayesian Optimization loop."""
+        
+        print("Starting optimization: LHS → KroneckerMTGP(8) → joint qLogEI (linear mean objective)")
 
         # 1) Initial LHS design (on unit cube)
         lhs = qmc.LatinHypercube(d=self.d)
@@ -181,10 +270,14 @@ class BayesianOptimizer:
         self.train_X = torch.cat([self.train_X, X0_unit], dim=0)
         self.train_Y = torch.cat([self.train_Y, Y0_t], dim=0)
 
+        # --- MODIFICATION: Init model variable ---
+        model = None
+
         # 2) Sequential batches
         for b in range(self.n_batches):
             print(f"\n=== Batch {b+1}/{self.n_batches} ===")
 
+            # Fit the GP model
             model = self._fit_gp_8out()
 
             # Select a q-batch on unit cube
@@ -201,6 +294,7 @@ class BayesianOptimizer:
                 Y_batch.append(y_np)
                 self._save_iteration_data(X_batch_orig_numpy[j], y_np)
 
+            # Add new data to training set
             Y_batch_t = torch.tensor(np.array(Y_batch), dtype=self.dtype, device=self.device)
             self.train_X = torch.cat([self.train_X, X_batch_unit], dim=0)
             self.train_Y = torch.cat([self.train_Y, Y_batch_t], dim=0)
@@ -231,6 +325,13 @@ class BayesianOptimizer:
             f"sigma_y={best_params_orig[2]:.6f}, width={best_params_orig[3]:.6f}, height={best_params[4]:.6f}"
         )
         print(f"Average displacement: {float(avg_disp[best_idx]):.6f}")
+
+        # --- MODIFICATION: Save the final model ---
+        if model is not None:
+            self.save_model_data(model)
+        else:
+            print("Warning: No model was trained (n_batches=0?), skipping model save.")
+
         print("Optimization completed.")
 
         return best_params_orig, best_displacements
