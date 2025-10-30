@@ -7,7 +7,7 @@ from .file_ops import FileOperations
 from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA_Y, MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT
 
 
-# ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 # ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 gui = ti.GUI("AGTaichiMPM")
 

@@ -1,273 +1,236 @@
-"""
-Bayesian_MultiTaskGP.py
-
-A minimal, production-ready wrapper around a Kronecker multi-task GP (8 outputs)
-that can be trained, saved, loaded, and used to predict 8-dimensional outputs
-from an input vector. Comments are in English as requested.
-
-Requirements (typical versions, adjust as needed):
-- torch >= 2.0
-- gpytorch >= 1.11
-- botorch >= 0.9
-
-This file provides:
-- class MultiTaskBayesModel: fit / predict / save / load
-- optional propose_next(q) using qLogExpectedImprovement (objective = mean across 8 outputs)
-- an example __main__ section with synthetic data to demonstrate usage
-
-Notes:
-- The model assumes block design for multi-task GP: for each input, all 8 outputs
-  are observed (shape (N, 8)).
-- Inputs are normalized to [0, 1]^d using user-specified bounds.
-- Outputs are standardized internally via BoTorch's Standardize(m=8).
-"""
-from __future__ import annotations
-
 import os
-import json
-from dataclasses import dataclass
-from typing import Optional, Tuple
-
+import numpy as np
 import torch
-import gpytorch
-from botorch.models import KroneckerMultiTaskGP
+import taichi as ti
+from typing import List, Tuple
+
+from scipy.stats import qmc
+
+# BoTorch / GPyTorch
+from botorch.models.multitask import KroneckerMultiTaskGP  # MTGP for block design (n,d) -> (n,m)
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.models.transforms.outcome import Standardize
-from botorch.acquisition.logei import qLogExpectedImprovement
-from botorch.acquisition.objective import LinearMCObjective
-from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.utils.transforms import unnormalize
 from botorch.optim import optimize_acqf
+from botorch.acquisition.objective import LinearMCObjective
+# --- FIX 1: IMPORT THE RECOMMENDED FUNCTION ---
+from botorch.acquisition.logei import qLogExpectedImprovement
+from botorch.sampling.normal import SobolQMCNormalSampler
+
+# Keep your original Taichi init exactly the same
+ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 
 
-@dataclass
-class ModelMeta:
-    """Metadata saved with the model for safe reloading."""
-    n_tasks: int
-    input_dim: int
-    dtype: str  # "float32" or "float64"
-    bounds_lb: list  # list of floats, length d
-    bounds_ub: list  # list of floats, length d
-
-    @staticmethod
-    def from_tensors(lb: torch.Tensor, ub: torch.Tensor, n_tasks: int, dtype: torch.dtype) -> "ModelMeta":
-        return ModelMeta(
-            n_tasks=n_tasks,
-            input_dim=lb.numel(),
-            dtype="float64" if dtype == torch.float64 else "float32",
-            bounds_lb=lb.detach().cpu().tolist(),
-            bounds_ub=ub.detach().cpu().tolist(),
-        )
-
-    def to_tensors(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.dtype]:
-        lb = torch.tensor(self.bounds_lb, device=device)
-        ub = torch.tensor(self.bounds_ub, device=device)
-        dtype = torch.float64 if self.dtype == "float64" else torch.float32
-        return lb, ub, dtype
+# ------------------------------ Helpers ------------------------------------
+def _unit_bounds(d: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Return [0,1]^d bounds as a (2, d) tensor for BoTorch optimize_acqf."""
+    lb = torch.zeros(d, dtype=dtype, device=device)
+    ub = torch.ones(d, dtype=dtype, device=device)
+    return torch.stack([lb, ub], dim=0)
 
 
-class MultiTaskBayesModel:
-    """A wrapper for an 8-output Kronecker multi-task GP with save/load/predict.
+class BayesianOptimizer:
+    """LHS → 8-output MTGP (KroneckerMultiTaskGP) → Linear(mean of 8) objective → joint qLogEI.
 
-    Usage:
-    >>> model = MultiTaskBayesModel(bounds=(lb, ub), n_tasks=8, device="cuda")
-    >>> model.fit(train_X_raw, train_Y)
-    >>> mean, var = model.predict(X_raw)  # shapes: (N, 8)
-    >>> model.save("mtgp_8out.pt")
-    >>> reloaded = MultiTaskBayesModel.load("mtgp_8out.pt", device="cpu")
-    >>> mean2, var2 = reloaded.predict(X_raw)
+    This version models the 8 correlated outputs using KroneckerMultiTaskGP (block design),
+    which natively takes train_X: (n, d) and train_Y: (n, 8) and captures task correlations.
+    
+    FIXED: Swapped qNEI for qLogEI per BoTorch recommendation.
+    FIXED: Corrected SobolQMCNormalSampler argument from 'num_samples' to 'sample_shape'.
     """
 
     def __init__(
         self,
-        bounds: Tuple[torch.Tensor, torch.Tensor],
-        n_tasks: int = 8,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device | str] = None,
-    ) -> None:
-        assert n_tasks > 1, "n_tasks must be >= 2 for a non-trivial multi-task GP"
-        self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = dtype
+        simulator,
+        bounds_list: List[Tuple[float, float]],
+        output_dir: str,
+        n_initial_points: int,
+        n_batches: int,
+        batch_size: int,
+        device=None,
+    ):
+        # Device / dtype setup
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
+        self.dtype = torch.float64
+        print(f"Using device: {self.device}")
 
-        lb, ub = bounds
-        lb = lb.to(self.device, self.dtype)
-        ub = ub.to(self.device, self.dtype)
-        assert lb.ndim == 1 and ub.ndim == 1 and lb.numel() == ub.numel(), "bounds must be (2,d) with matching shapes"
-        assert torch.all(ub > lb), "Each upper bound must be greater than the corresponding lower bound"
+        # External simulator (Taichi) and output
+        self.simulator = simulator
+        self.output_dir = output_dir or "results_bayes_routeA"
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.results_file = os.path.join(self.output_dir, "optimization_results.csv")
 
-        self.lb = lb
-        self.ub = ub
-        self.input_dim = lb.numel()
-        self.n_tasks = n_tasks
+        # Search / evaluation settings
+        self.n_initial_points = int(n_initial_points)
+        self.n_batches = int(n_batches)
+        self.batch_size = int(batch_size)  # q
 
-        self.model: Optional[KroneckerMultiTaskGP] = None
-        self.mll: Optional[ExactMarginalLogLikelihood] = None
+        # Number of tasks (multi-output size)
+        self.n_tasks = 8
 
-        # Cached training data in unit space for reproducible reloads
-        self._train_X_unit: Optional[torch.Tensor] = None  # shape: (N, d)
-        self._train_Y: Optional[torch.Tensor] = None       # shape: (N, n_tasks)
+        # Bounds and unit cube convenience
+        self.bounds = torch.tensor(bounds_list, dtype=self.dtype, device=self.device).t()  # (2, d)
+        self.d = self.bounds.shape[1]
+        self.unit_bounds = _unit_bounds(self.d, self.device, self.dtype)
 
-    # --------------------------
-    # Utilities
-    # --------------------------
-    def _to_unit(self, X_raw: torch.Tensor) -> torch.Tensor:
-        """Map raw inputs from [lb, ub] to [0,1]^d (broadcast-safe)."""
-        return (X_raw - self.lb) / (self.ub - self.lb)
+        # Training containers: X is normalized in [0,1]^d; Y has shape (n, 8)
+        self.train_X = torch.empty((0, self.d), dtype=self.dtype, device=self.device)
+        self.train_Y = torch.empty((0, self.n_tasks), dtype=self.dtype, device=self.device)
 
-    def _check_and_cast_X(self, X: torch.Tensor) -> torch.Tensor:
-        assert X.ndim == 2 and X.shape[1] == self.input_dim, f"Expected (N, {self.input_dim}) input"
-        return X.to(self.device, self.dtype)
+        self._init_results_file()
 
-    def _check_and_cast_Y(self, Y: torch.Tensor) -> torch.Tensor:
-        assert Y.ndim == 2 and Y.shape[1] == self.n_tasks, f"Expected (N, {self.n_tasks}) targets"
-        return Y.to(self.device, self.dtype)
+    # ------------------------------ I/O helpers ------------------------------
+    def _init_results_file(self):
+        headers = ["n", "eta", "sigma_y", "width", "height"] + [f"x_{i+1:02d}" for i in range(self.n_tasks)]
+        with open(self.results_file, "w") as f:
+            f.write(",".join(headers) + "\n")
 
-    # --------------------------
-    # Training
-    # --------------------------
-    def fit(self, train_X_raw: torch.Tensor, train_Y: torch.Tensor, *, training_iters: int = 200) -> None:
-        """Fit the Kronecker multi-task GP.
+    def _save_iteration_data(self, params_numpy: np.ndarray, displacements_numpy: np.ndarray):
+        """Append one row of (params, 8 displacements) to CSV."""
+        row = params_numpy.tolist() + displacements_numpy.tolist()
+        with open(self.results_file, "a") as f:
+            f.write(",".join([f"{v:.16f}" for v in row]) + "\n")
 
-        Args:
-            train_X_raw: (N, d) inputs in ORIGINAL scale (within [lb, ub]).
-            train_Y:     (N, n_tasks) targets. All tasks must be observed per input (block design).
-            training_iters: Max iterations for hyperparameter optimization (Adam+LBFGS under the hood).
+    # ------------------------------ Simulation ------------------------------
+    def run_simulation(self, params_numpy: np.ndarray) -> np.ndarray:
+        """Call your Taichi simulator; returns 8 displacements. (UNCHANGED)"""
+        n, eta, sigma_y, width, height = params_numpy
+        self.simulator.configure_geometry(width, height)
+        displacements = self.simulator.run_simulation(n, eta, sigma_y)
+
+        if displacements is None:
+            return np.zeros(self.n_tasks, dtype=float)
+        y = np.array(displacements, dtype=float).reshape(-1)
+        if not np.all(np.isfinite(y)) or y.size < self.n_tasks:
+            out = np.zeros(self.n_tasks, dtype=float)
+            out[: min(self.n_tasks, y.size)] = y[: min(self.n_tasks, y.size)]
+            return out
+        return y[: self.n_tasks]
+
+    # ------------------------------ Modeling ---------------------------------
+    def _fit_gp_8out(self) -> KroneckerMultiTaskGP:
         """
-        X_raw = self._check_and_cast_X(train_X_raw)
-        Y = self._check_and_cast_Y(train_Y)
-
-        # Normalize inputs to unit hypercube
-        X_unit = self._to_unit(X_raw)
-        self._train_X_unit = X_unit.detach().clone()
-        self._train_Y = Y.detach().clone()
-
-        # Build model with standardized outcomes (per-task mean/var learned from data)
-        outcome_tf = Standardize(m=self.n_tasks)
-        self.model = KroneckerMultiTaskGP(X_unit, Y, rank=1, outcome_transform=outcome_tf).to(self.device, self.dtype)
-        self.model.train()
-        self.model.likelihood.train()
-
-        self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
-
-        # Optimize hyperparameters
-        fit_gpytorch_mll(self.mll, options={"maxiter": training_iters})
-
-    # --------------------------
-    # Prediction
-    # --------------------------
-    @torch.no_grad()
-    def predict(self, X_raw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Predict the 8-D output for raw-scale inputs.
-
-        Args:
-            X_raw: (N, d) inputs in ORIGINAL scale.
-        Returns:
-            mean: (N, n_tasks), predictive means per task
-            var:  (N, n_tasks), predictive marginal variances per task
+        Fit a KroneckerMultiTaskGP to the 8-output data (block design).
+        (UNCHANGED)
         """
-        assert self.model is not None, "Call fit() or load() before predict()"
-        X_raw = self._check_and_cast_X(X_raw)
-        X_unit = self._to_unit(X_raw)
+        model = KroneckerMultiTaskGP(
+            train_X=self.train_X,                             # (n, d) on unit cube
+            train_Y=self.train_Y,                             # (n, 8)
+            outcome_transform=Standardize(m=self.n_tasks),    # standardize 8 outputs
+        )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+        return model
 
-        self.model.eval(); self.model.likelihood.eval()
-        posterior = self.model.posterior(X_unit)
-        mean = posterior.mean.view(-1, self.n_tasks)
-        var = posterior.variance.view(-1, self.n_tasks)
-        return mean, var
-
-    # --------------------------
-    # Propose next candidates (optional)
-    # --------------------------
-    @torch.no_grad()
-    def propose_next(self, q: int = 1, *, samples: int = 256) -> torch.Tensor:
-        """Propose q new candidates by maximizing qLogExpectedImprovement.
-
-        Objective = mean across the 8 outputs. This is a common scalarization; adjust
-        weights for other trade-offs.
-
-        Returns:
-            X_next_raw: (q, d) candidates in ORIGINAL scale.
-        """
-        assert self.model is not None and self._train_X_unit is not None and self._train_Y is not None, "Model must be fit before proposing"
-
-        self.model.eval(); self.model.likelihood.eval()
-
-        # Linear objective that averages the 8 tasks
-        weights = torch.ones(self.n_tasks, device=self.device, dtype=self.dtype) / self.n_tasks
+    # ------------------------------ Acquisition: joint qEI ------------------
+    def _select_q_joint_ei(self, model, q: int) -> torch.Tensor:
+        
+        weights = torch.ones(self.n_tasks, dtype=self.dtype, device=self.device) / self.n_tasks
         objective = LinearMCObjective(weights=weights)
 
-        # Compute best_f in standardized space if outcome_transform exists
-        if getattr(self.model, "outcome_transform", None) is not None:
-            Y_std, _ = self.model.outcome_transform(self._train_Y)
-            best_f = (Y_std @ weights).max()
+
+        sampler = SobolQMCNormalSampler(sample_shape=torch.Size([256]))
+
+        if getattr(model, "outcome_transform", None) is not None:
+            Y_std = model.outcome_transform(self.train_Y)[0]      
+            y_obj_std = Y_std @ weights                           
+            best_f = y_obj_std.max()
         else:
-            best_f = (self._train_Y @ weights).max()
+            y_obj = (self.train_Y @ weights)
+            best_f = y_obj.max()
 
-        sampler = SobolQMCNormalSampler(sample_shape=torch.Size([samples]))
-        acqf = qLogExpectedImprovement(model=self.model, best_f=best_f, sampler=sampler, objective=objective)
-
-        # Bounds in unit space
-        unit_bounds = torch.stack([torch.zeros(self.input_dim, device=self.device, dtype=self.dtype),
-                                   torch.ones(self.input_dim, device=self.device, dtype=self.dtype)])
-
-        candidates, _ = optimize_acqf(
+        acqf = qLogExpectedImprovement(
+            model=model,
+            best_f=best_f,
+            sampler=sampler,
+            objective=objective,
+        )
+        cands, _ = optimize_acqf(
             acqf,
-            bounds=unit_bounds,
+            bounds=self.unit_bounds,
             q=q,
-            num_restarts=8,
+            num_restarts=8,             
             raw_samples=256,
             options={"batch_limit": 5, "maxiter": 200},
         )
-        X_next_unit = candidates.detach()
-        # Map back to raw/original scale
-        X_next_raw = self.lb + X_next_unit * (self.ub - self.lb)
-        return X_next_raw
+        
+        return cands.detach()
 
-    # --------------------------
-    # Persistence
-    # --------------------------
-    def save(self, path: str) -> None:
-        """Save model, training data (unit-space), and metadata for exact reloads."""
-        assert self.model is not None and self._train_X_unit is not None and self._train_Y is not None, "Nothing to save (fit the model first)"
-        meta = ModelMeta.from_tensors(self.lb, self.ub, self.n_tasks, self.dtype)
-        payload = {
-            "meta": meta.__dict__,
-            "train_X_unit": self._train_X_unit.detach().cpu(),
-            "train_Y": self._train_Y.detach().cpu(),
-            "model_state_dict": self.model.state_dict(),
-            "likelihood_state_dict": self.model.likelihood.state_dict(),
-        }
-        torch.save(payload, path)
+    # ------------------------------ Main loop --------------------------------
+    def optimize(self):
+        print("Starting optimization: LHS → KroneckerMTGP(8) → joint qLogNEI (linear mean objective)")
 
-        # Also drop a small JSON sidecar for quick inspection (optional)
-        sidecar = os.path.splitext(path)[0] + ".json"
-        with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump(payload["meta"], f, indent=2)
+        # 1) Initial LHS design (on unit cube)
+        lhs = qmc.LatinHypercube(d=self.d)
+        X0_unit_np = lhs.random(self.n_initial_points)  # ndarray on [0,1]
+        X0_unit = torch.tensor(X0_unit_np, dtype=self.dtype, device=self.device)
 
-    @staticmethod
-    def load(path: str, device: Optional[torch.device | str] = None) -> "MultiTaskBayesModel":
-        """Reload a previously saved model for immediate prediction/proposal."""
-        map_loc = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        payload = torch.load(path, map_location=map_loc)
+        # Evaluate initial points (in original bounds)
+        Y0 = []
+        for i in range(self.n_initial_points):
+            x_unit = X0_unit[i]
+            x_orig = unnormalize(x_unit.unsqueeze(0), bounds=self.bounds).squeeze(0).cpu().numpy()
+            y_vals = self.run_simulation(x_orig)
+            Y0.append(y_vals)
+            self._save_iteration_data(x_orig, y_vals)
 
-        meta = ModelMeta(**payload["meta"])
-        lb, ub, dtype = meta.to_tensors(map_loc)
+        Y0_t = torch.tensor(np.array(Y0), dtype=self.dtype, device=self.device)
+        self.train_X = torch.cat([self.train_X, X0_unit], dim=0)
+        self.train_Y = torch.cat([self.train_Y, Y0_t], dim=0)
 
-        model = MultiTaskBayesModel(bounds=(lb, ub), n_tasks=meta.n_tasks, dtype=dtype, device=map_loc)
+        # 2) Sequential batches
+        for b in range(self.n_batches):
+            print(f"\n=== Batch {b+1}/{self.n_batches} ===")
 
-        # Rebuild the model with cached training data in unit space
-        train_X_unit = payload["train_X_unit"].to(map_loc, dtype)
-        train_Y = payload["train_Y"].to(map_loc, dtype)
-        model._train_X_unit = train_X_unit.clone()
-        model._train_Y = train_Y.clone()
+            model = self._fit_gp_8out()
 
-        outcome_tf = Standardize(m=meta.n_tasks)
-        model.model = KroneckerMultiTaskGP(train_X_unit, train_Y, rank=1, outcome_transform=outcome_tf).to(map_loc, dtype)
-        model.mll = ExactMarginalLogLikelihood(model.model.likelihood, model.model)
+            # Select a q-batch on unit cube
+            X_batch_unit = self._select_q_joint_nei(model, q=self.batch_size)
 
-        # Load learned parameters (kernel hyperparams, task covariances, outcome transform stats, etc.)
-        model.model.load_state_dict(payload["model_state_dict"])  # includes transform buffers
-        model.model.likelihood.load_state_dict(payload["likelihood_state_dict"])  # for completeness
+            # Map back to original bounds for simulation
+            X_batch_orig = unnormalize(X_batch_unit, bounds=self.bounds)
+            X_batch_orig_numpy = X_batch_orig.detach().cpu().numpy()
 
-        model.model.eval(); model.model.likelihood.eval()
-        return model
+            # Evaluate batch
+            Y_batch = []
+            for j in range(self.batch_size):
+                y_np = self.run_simulation(X_batch_orig_numpy[j])
+                Y_batch.append(y_np)
+                self._save_iteration_data(X_batch_orig_numpy[j], y_np)
+
+            Y_batch_t = torch.tensor(np.array(Y_batch), dtype=self.dtype, device=self.device)
+            self.train_X = torch.cat([self.train_X, X_batch_unit], dim=0)
+            self.train_Y = torch.cat([self.train_Y, Y_batch_t], dim=0)
+
+            # Track current best by average over 8 outputs
+            avg_now = self.train_Y.mean(dim=1)
+            best_idx = int(torch.argmax(avg_now).item())
+            best_params = unnormalize(
+                self.train_X[best_idx : best_idx + 1, :], bounds=self.bounds
+            ).squeeze(0).cpu().numpy()
+            print(
+                f"Current best avg: {float(avg_now[best_idx]):.6f} at "
+                f"n={best_params[0]:.6f}, eta={best_params[1]:.6f}, sigma_y={best_params[2]:.6f}, "
+                f"width={best_params[3]:.6f}, height={best_params[4]:.6f}"
+            )
+
+        # Final best
+        avg_disp = self.train_Y.mean(dim=1)
+        best_idx = int(torch.argmax(avg_disp).item())
+        best_params_orig = unnormalize(
+            self.train_X[best_idx : best_idx + 1, :], bounds=self.bounds
+        ).squeeze(0).cpu().numpy()
+        best_displacements = self.train_Y[best_idx].detach().cpu().numpy()
+
+        print("\n--- Best Result (by average displacement over 8 outputs) ---")
+        print(
+            f"Params: n={best_params_orig[0]:.6f}, eta={best_params_orig[1]:.6f}, "
+            f"sigma_y={best_params_orig[2]:.6f}, width={best_params_orig[3]:.6f}, height={best_params[4]:.6f}"
+        )
+        print(f"Average displacement: {float(avg_disp[best_idx]):.6f}")
+        print("Optimization completed.")
+
+        return best_params_orig, best_displacements
