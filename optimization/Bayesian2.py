@@ -32,8 +32,8 @@ import torch
 import gpytorch
 from botorch.models import KroneckerMultiTaskGP
 from botorch.fit import fit_gpytorch_mll
-from botorch.mlls import ExactMarginalLogLikelihood
-from botorch.transforms.outcome import Standardize
+from gpytorch.mlls import ExactMarginalLogLikelihood
+from botorch.models.transforms.outcome import Standardize
 from botorch.acquisition.logei import qLogExpectedImprovement
 from botorch.acquisition.objective import LinearMCObjective
 from botorch.sampling.normal import SobolQMCNormalSampler
