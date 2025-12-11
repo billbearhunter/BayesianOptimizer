@@ -76,11 +76,11 @@ class GPConfig:
 # -------------------------------------------------------------------------
 # Taichi initialization
 # -------------------------------------------------------------------------
-try:
-    ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
-    print("[Bayesian6] Taichi initialized on GPU.")
-except Exception as e:
-    print(f"[Bayesian6] Warning: Taichi init failed or already initialized: {e}")
+# try:
+#     ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+#     print("[Bayesian6] Taichi initialized on GPU.")
+# except Exception as e:
+#     print(f"[Bayesian6] Warning: Taichi init failed or already initialized: {e}")
 
 
 # -------------------------------------------------------------------------
