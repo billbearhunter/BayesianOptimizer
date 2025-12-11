@@ -123,6 +123,7 @@ def run_optimization(
             svgp_threshold=svgp_threshold,
             resume=resume,          # detect if we should load CSV
             target_total=target_total,  # global target for batch-wise resume
+            test_csv_path="validation_set.csv"
         )
 
         best_params, best_value = optimizer.optimize()

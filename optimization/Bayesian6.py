@@ -236,12 +236,13 @@ class BayesianOptimizer:
         n_initial_points: int,
         n_batches: int,
         batch_size: int,
-        num_outputs: int = 8,  # [Fix] Added parameter to avoid hardcoding
+        num_outputs: int = 8,
         svgp_threshold: int = 2500,  
         resume: bool = False,
         target_total: Optional[int] = None,
         device: Optional[torch.device] = None,
         gp_config: Optional[GPConfig] = None,
+        test_csv_path: Optional[str] = None,  # [NEW] Argument for test set
         **kwargs 
     ):
         """
@@ -260,7 +261,7 @@ class BayesianOptimizer:
         
         self.dtype = torch.float64
         print(f"[BayesianOptimizer] Device: {self.gp_device} | SVGP Threshold: {self.config.svgp_threshold}")
-        print(f"[BayesianOptimizer] Strategy: Dynamic Validation (Alpha={self.config.allocation_alpha})")
+        print(f"[BayesianOptimizer] Strategy: Test Set Validation (Alpha={self.config.allocation_alpha})")
         
         if kwargs:
             print(f"[BayesianOptimizer] Warning: Ignoring unused arguments: {list(kwargs.keys())}")
@@ -269,7 +270,6 @@ class BayesianOptimizer:
         self.physical_bounds = list(bounds_list)
         self.dim = len(self.physical_bounds)
         
-        # [Fix] Check bounds for negative values warning
         bounds_arr = np.array(self.physical_bounds)
         if np.any(bounds_arr[:, 0] <= 0):
             print("\n[WARNING] Some lower bounds are <= 0. "
@@ -279,15 +279,18 @@ class BayesianOptimizer:
         self.n_initial_points = int(n_initial_points)
         self.n_batches = int(n_batches)
         self.batch_size = int(batch_size)
-        
-        # [Fix] Use the passed argument
         self.num_outputs = int(num_outputs)
         
         self.resume = resume
         self.target_total = target_total
         
+        # Training Data
         self.train_X = torch.empty((0, self.dim), dtype=self.dtype, device=self.gp_device)
         self.train_Y_raw = torch.empty((0, self.num_outputs), dtype=self.dtype, device=self.gp_device)
+        
+        # Test Data placeholders
+        self.test_X = None
+        self.test_Y_raw = None
         
         # Output normalization in log-space
         self.y_mean: Optional[torch.Tensor] = None
@@ -305,12 +308,18 @@ class BayesianOptimizer:
         
         os.makedirs(output_dir, exist_ok=True)
         self.output_dir = output_dir
-        # NOTE: keep your original CSV naming here if you rely on it elsewhere
         self.results_csv_path = os.path.join(output_dir, "optimization_results.csv")
         self.model_save_path = os.path.join(output_dir, "trained_botorch_model.pt")
         self.failure_log_path = os.path.join(output_dir, "simulation_failures.log")
         
         self._init_or_load_results_file()
+        
+        # [NEW] Load Test Set if provided
+        if test_csv_path and os.path.exists(test_csv_path):
+            print(f"[BayesianOptimizer] Loading test set from {test_csv_path}")
+            self._load_test_set(test_csv_path)
+        else:
+            print("[BayesianOptimizer] No test set provided (or file not found). Validation metrics will be dummy.")
 
     # ------------------------------------------------------------------
     # Data Management
@@ -366,6 +375,39 @@ class BayesianOptimizer:
         
         print(f"[BayesianOptimizer] Loaded {self.train_X.shape[0]} samples.")
     
+    def _load_test_set(self, test_csv_path: str) -> None:
+        """
+        Load independent test set from CSV.
+        Assumes same column structure as results CSV.
+        """
+        try:
+            df = pd.read_csv(test_csv_path)
+            x_cols = ["n", "eta", "sigma_y", "width", "height"]
+            y_cols = [f"x_{i:02d}" for i in range(1, self.num_outputs + 1)]
+            
+            # Basic validation
+            if not all(c in df.columns for c in x_cols + y_cols):
+                print("[Warning] Test CSV columns mismatch. Ignoring test set.")
+                return
+
+            X_phys = df[x_cols].to_numpy(dtype=np.float64)
+            Y_raw = df[y_cols].to_numpy(dtype=np.float64)
+            
+            bounds = np.array(self.physical_bounds, dtype=np.float64)
+            lower = bounds[:, 0]
+            upper = bounds[:, 1]
+            
+            # Normalize inputs using the same physical bounds
+            X_unit = (X_phys - lower) / (upper - lower)
+            
+            self.test_X = torch.from_numpy(X_unit).to(self.gp_device, dtype=self.dtype)
+            self.test_Y_raw = torch.from_numpy(Y_raw).to(self.gp_device, dtype=self.dtype)
+            
+            print(f"[BayesianOptimizer] Loaded {self.test_X.shape[0]} test samples.")
+            
+        except Exception as e:
+            print(f"[Error] Failed to load test set: {e}")
+
     def _save_iteration_data(self, x_phys: np.ndarray, disp: np.ndarray) -> None:
         with open(self.results_csv_path, "a", encoding="utf-8") as f:
             row = np.concatenate([x_phys, disp])
@@ -377,29 +419,15 @@ class BayesianOptimizer:
             f.write(f"[{timestamp}] {params} -> {error_msg}\n")
 
     # ------------------------------------------------------------------
-    # Simulator (kept exactly like your original design)
+    # Simulator
     # ------------------------------------------------------------------
     def _scaled_to_original(self, x_scaled: torch.Tensor) -> np.ndarray:
-        """
-        Convert a point in unit space [0,1]^d to physical parameter space
-        using the provided bounds.
-        """
         values = []
         for i, (lower, upper) in enumerate(self.physical_bounds):
             values.append(lower + (upper - lower) * x_scaled[i].item())
         return np.array(values, dtype=np.float64)
 
     def run_simulation(self, params) -> Optional[np.ndarray]:
-        """
-        Call the external MPMSimulator with your original interface:
-
-        params: [n, eta, sigma_y, width, height]
-        - configure_geometry(width, height)
-        - run_simulation(n, eta, sigma_y)
-
-        Returns:
-            disp: np.ndarray of shape (num_outputs,) or None on failure.
-        """
         if isinstance(params, torch.Tensor):
             params_np = params.detach().cpu().numpy().astype(np.float64).reshape(-1)
         else:
@@ -422,7 +450,6 @@ class BayesianOptimizer:
         
         disp = np.asarray(displacements, dtype=np.float64).reshape(-1)
         
-        # Pad or truncate to num_outputs
         if disp.shape[0] < self.num_outputs:
             padded = np.zeros(self.num_outputs, dtype=np.float64)
             padded[: disp.shape[0]] = disp
@@ -440,18 +467,12 @@ class BayesianOptimizer:
     # Stats Helpers
     # ------------------------------------------------------------------
     def _compute_safe_epsilon(self, tensor: torch.Tensor) -> float:
-        """Compute a small epsilon relative to tensor scale to keep values positive."""
         if tensor.numel() == 0:
             return 1e-6
         abs_max = tensor.abs().max().item()
         return max(1e-12, abs_max * 1e-6)
     
     def _update_output_stats(self) -> None:
-        """
-        Update log-transform statistics for outputs:
-        - global scalar shift (shared across outputs),
-        - per-output mean and std in log space.
-        """
         if self.train_Y_raw.shape[0] < 2:
             return
 
@@ -475,9 +496,6 @@ class BayesianOptimizer:
         self.y_std = std
     
     def _compute_log_input_stats(self) -> None:
-        """
-        Compute mean and std of log-physical inputs for SVGP inducing points.
-        """
         X_unit = self.train_X
         bounds = torch.tensor(self.physical_bounds, dtype=self.dtype, device=self.gp_device).T
         lower, upper = bounds[0], bounds[1]
@@ -493,21 +511,16 @@ class BayesianOptimizer:
     # GP Fitting (Exact and SVGP)
     # ------------------------------------------------------------------
     def _fit_exact_gp(self) -> SingleTaskGP:
-        """
-        Fit an exact multi-output GP (SingleTaskGP) in log-standardized space.
-        """
         X_unit = self.train_X
         Y_raw = self.train_Y_raw
         
         self._update_output_stats()
         Y_log = torch.log(Y_raw + self.y_log_shift)
         if torch.isnan(Y_log).any():
-            print("[Warning] NaN in Y_log. Clamping.")
             Y_log = torch.nan_to_num(Y_log, nan=0.0)
 
         Y_log_std = (Y_log - self.y_mean) / self.y_std
         if torch.isnan(Y_log_std).any():
-            print("[Warning] NaN in Y_log_std. Clamping.")
             Y_log_std = torch.nan_to_num(Y_log_std, nan=0.0)
         
         d = X_unit.shape[-1]
@@ -536,10 +549,6 @@ class BayesianOptimizer:
         return gp
 
     def _fit_svgp(self) -> ModelListGP:
-        """
-        Fit a ModelListGP of SVGPs, one per output dimension.
-        Each SVGP uses log-standardized inputs and outputs.
-        """
         X_unit = self.train_X
         Y_raw = self.train_Y_raw
         
@@ -557,7 +566,6 @@ class BayesianOptimizer:
         
         bounds = torch.tensor(self.physical_bounds, dtype=self.dtype, device=self.gp_device).T
         lower, upper = bounds[0], bounds[1]
-        # Inducing point selection in log-standardized input space
         X_phys = X_unit * (upper - lower) + lower
         X_log = torch.log(torch.clamp(X_phys, min=1e-6))
         X_log_std = (X_log - self.x_log_mean) / self.x_log_std
@@ -600,9 +608,6 @@ class BayesianOptimizer:
         return gp
 
     def _train_single_svgp(self, model, likelihood, X_unit, y_std, num_epochs):
-        """
-        Train a single-output SVGP with mini-batches and early stopping.
-        """
         model.train()
         likelihood.train()
         
@@ -655,9 +660,6 @@ class BayesianOptimizer:
         likelihood.eval()
 
     def fit_gp_model(self) -> torch.nn.Module:
-        """
-        Fit a GP model (Exact or SVGP) depending on data size.
-        """
         if self.gp is not None:
             del self.gp
             self.models = []
@@ -683,133 +685,78 @@ class BayesianOptimizer:
         return self.gp
 
     # ------------------------------------------------------------------
-    # Dynamic Validation Helper (with proper stats restore)
+    # Test Set Evaluation (Replaces Dynamic Validation)
     # ------------------------------------------------------------------
-    def _compute_validation_metrics(self, train_ratio=0.8):
+    def _evaluate_on_test_set(self, gp):
         """
-        Temporarily splits dataset to train a proxy model and compute
-        validation metrics.
-        
-        [Fix] Explicitly checks proxy_gp type to handle shape mismatches
-        between ExactGP and ModelListGP independently of self.gp_mode.
+        Evaluate the provided GP model on self.test_X.
+        Returns: (val_errors, val_uncertainties)
         """
-        print(f"[Validation] Splitting data {train_ratio*100:.0f}/{100-train_ratio*100:.0f} for error estimation...")
-        
-        N = self.train_X.shape[0]
-        indices = torch.randperm(N)
-        split = int(N * train_ratio)
-        
-        train_idx = indices[:split]
-        val_idx = indices[split:]
-        
-        # Save full data
-        original_X = self.train_X
-        original_Y = self.train_Y_raw
+        if self.test_X is None or self.test_Y_raw is None:
+            # Fallback if no test set
+            return np.ones(self.num_outputs), np.ones(self.num_outputs)
 
-        # Backup stats
-        orig_y_mean = self.y_mean.clone() if self.y_mean is not None else None
-        orig_y_std = self.y_std.clone() if self.y_std is not None else None
-        orig_y_log_shift = self.y_log_shift.clone() if self.y_log_shift is not None else None
-        orig_x_log_mean = self.x_log_mean.clone() if self.x_log_mean is not None else None
-        orig_x_log_std = self.x_log_std.clone() if self.x_log_std is not None else None
+        print("[Validation] Evaluating on Test Set...")
+        gp.eval()
         
-        X_train_sub = original_X[train_idx]
-        Y_train_sub = original_Y[train_idx]
-        X_val_sub = original_X[val_idx]
-        Y_val_sub = original_Y[val_idx]
-        
-        try:
-            # Train proxy model on subset
-            self.train_X = X_train_sub
-            self.train_Y_raw = Y_train_sub
+        with torch.no_grad():
+            # Get predictions (mean/var in standardized log space)
+            posterior = gp.posterior(self.test_X)
+            mean_std = posterior.mean
+            var_std = posterior.variance
             
-            # Decide proxy type based on subset size
-            if self.train_X.shape[0] <= self.config.svgp_threshold:
-                proxy_gp = self._fit_exact_gp()
+            # Unify shapes (ModelListGP vs ExactGP)
+            if self.gp_mode == "exact":
+                if mean_std.ndim == 3: mean_std = mean_std.squeeze(0)
+                if var_std.ndim == 3: var_std = var_std.squeeze(0)
             else:
-                proxy_gp = self._fit_svgp()
+                # SVGP / ModelList output usually [num_outputs, num_points] or similar
+                # Check dimensions to align with (N_test, num_outputs) or (num_outputs, N_test)
+                if mean_std.shape[0] == self.num_outputs and mean_std.shape[-1] == self.test_X.shape[0]:
+                    mean_std = mean_std.T
+                    var_std = var_std.T
+
+            # Transform back to raw space
+            # y_std = (log(y+shift) - mu) / sigma
+            # log(y+shift) = y_std * sigma + mu
+            y_mean = self.y_mean.to(self.gp_device)
+            y_std_val = self.y_std.to(self.gp_device)
+            shift = self.y_log_shift.to(self.gp_device)
             
-            proxy_gp.eval()
-            with torch.no_grad():
-                posterior = proxy_gp.posterior(X_val_sub)
-                mean_std = posterior.mean
-                var_std = posterior.variance
-                
-                # [Fix] Handle shapes based on specific proxy model type
-                if isinstance(proxy_gp, SingleTaskGP):
-                    # Exact GP output: [batch_shape, output_dim, n_points] or [output_dim, n_points]
-                    if mean_std.ndim == 3:
-                        mean_std = mean_std.squeeze(0)
-                    if var_std.ndim == 3:
-                        var_std = var_std.squeeze(0)
-                
-                elif isinstance(proxy_gp, ModelListGP):
-                    # ModelListGP output often: [output_dim, n_points]
-                    # But sometimes transposed depending on posterior call
-                    if mean_std.shape[0] == self.num_outputs and mean_std.shape[-1] == X_val_sub.shape[0]:
-                        mean_std = mean_std.T
-                        var_std = var_std.T
-
-                # Reconstruct predictions in original scale
-                y_mean = self.y_mean.to(self.gp_device)
-                y_std_val = self.y_std.to(self.gp_device)
-                shift = self.y_log_shift.to(self.gp_device)
-                
-                log_mean = mean_std * y_std_val + y_mean
-                # Log-Normal Mean recovery
-                log_var = var_std * (y_std_val ** 2)
-                Y_pred_val = torch.exp(log_mean + 0.5 * log_var) - shift
-                
-                ssr = (Y_val_sub - Y_pred_val).pow(2).sum(dim=0)
-                sst = (Y_val_sub - Y_val_sub.mean(dim=0)).pow(2).sum(dim=0)
-                sst = torch.where(sst < 1e-9, torch.ones_like(sst), sst)
-                
-                val_errors = (ssr / sst).cpu().numpy()
-                
-                # [Fix] Robust variance averaging
-                if var_std.ndim == 2:
-                    mean_var = var_std.mean(dim=0) # [n_outputs] if shape is [n_points, n_outputs]
-                elif var_std.ndim == 3:
-                     # e.g. [1, n_points, n_outputs] -> mean over batch and points
-                    mean_var = var_std.mean(dim=(0, 1)) 
-                else:
-                    # Fallback
-                    mean_var = var_std.mean(dim=0)
-                    
-                val_uncertainties = mean_var.cpu().numpy()
-
-        finally:
-            # Restore full data
-            self.train_X = original_X
-            self.train_Y_raw = original_Y
-
-            # Restore original statistics
-            self.y_mean = orig_y_mean
-            self.y_std = orig_y_std
-            self.y_log_shift = orig_y_log_shift
-            self.x_log_mean = orig_x_log_mean
-            self.x_log_std = orig_x_log_std
-
-            if "proxy_gp" in locals():
-                del proxy_gp
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            log_mean = mean_std * y_std_val + y_mean
+            # Var[log Y] ~ var_std * y_std^2
+            log_var = var_std * (y_std_val ** 2)
             
-            print("[Validation] Done.")
-        
+            # Mean of Log-Normal: exp(mu + sigma^2/2) - shift
+            Y_pred = torch.exp(log_mean + 0.5 * log_var) - shift
+            
+            # Error (1 - R2 like metric or normalized SSE)
+            Y_true = self.test_Y_raw
+            ssr = (Y_true - Y_pred).pow(2).sum(dim=0)
+            sst = (Y_true - Y_true.mean(dim=0)).pow(2).sum(dim=0)
+            sst = torch.where(sst < 1e-9, torch.ones_like(sst), sst)
+            
+            val_errors = (ssr / sst).cpu().numpy()
+            
+            # Uncertainty (average variance per output)
+            if var_std.ndim == 2:
+                mean_var = var_std.mean(dim=0)
+            elif var_std.ndim == 3:
+                mean_var = var_std.mean(dim=(0, 1))
+            else:
+                mean_var = var_std.mean(dim=0)
+                
+            val_uncertainties = mean_var.cpu().numpy()
+            
         return val_errors, val_uncertainties
 
     # ------------------------------------------------------------------
     # Evaluation (Training Data)
     # ------------------------------------------------------------------
     def evaluate_model(self, dataset_name: str = "Training Data") -> pd.DataFrame:
-        """
-        Evaluate current GP on training data, computing R2/MSE/MAE/MaxErr per output.
-        """
         if self.gp is None or self.train_X.shape[0] < 5:
             return pd.DataFrame()
             
-        # Quick marginal coverage metric for exploration monitoring
         if self.train_X.shape[0] > 10:
             try:
                 X_np = self.train_X.cpu().numpy()
@@ -892,10 +839,6 @@ class BayesianOptimizer:
         max_attempts: int = 10,
         batch_check: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Avoid sampling points too close to existing data or same-batch points
-        by adding small perturbations.
-        """
         if self.train_X.shape[0] == 0 and (batch_check is None or batch_check.shape[0] == 0):
             return X_cand
             
@@ -928,10 +871,6 @@ class BayesianOptimizer:
         return X_new
 
     def _allocate_quotas(self, scores: np.ndarray, total_q: int) -> np.ndarray:
-        """
-        Allocate integer quotas per output based on scores.
-        Ensures at least default_quota per output.
-        """
         min_per_output = max(1, self.config.default_quota)
         base = np.ones_like(scores, dtype=int) * min_per_output
         remaining = total_q - len(scores) * min_per_output
@@ -955,9 +894,6 @@ class BayesianOptimizer:
         return quotas
 
     def save_gp_model(self, path: Optional[str] = None) -> None:
-        """
-        Save GP model and normalization statistics to disk.
-        """
         if path is None:
             path = self.model_save_path
         if self.gp is None:
@@ -1022,25 +958,31 @@ class BayesianOptimizer:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
-            # --- Step 1: Dynamic Validation ---
-            if self.train_X.shape[0] > 20: 
-                val_errors, val_uncertainties = self._compute_validation_metrics(train_ratio=0.8)
-                print("[Metric] Using Validation Set Error (1-R2) for allocation.")
-            else:
-                # For very few points, just fit once and use uniform metrics
-                _ = self.fit_gp_model() 
-                val_errors = np.ones(self.num_outputs) 
-                val_uncertainties = np.ones(self.num_outputs)
+            # --- Step 1: Fit GP on FULL dataset ONCE ---
+            print("[GP] Training on FULL dataset...")
+            gp = self.fit_gp_model()
             
-            # --- Step 2: Quota allocation across outputs ---
+            # Optional: Print training metrics
+            self.evaluate_model()
+            
+            # --- Step 2: Validate using Test Set ---
+            # Use the already trained 'gp' to evaluate on the test set
+            if self.test_X is not None:
+                val_errors, val_uncertainties = self._evaluate_on_test_set(gp)
+            else:
+                # Fallback if no test set provided
+                val_errors = np.ones(self.num_outputs)
+                val_uncertainties = np.ones(self.num_outputs)
+
+            # --- Step 3: Quota allocation across outputs ---
             u_norm = val_uncertainties / (val_uncertainties.sum() + 1e-10)
             e_norm = val_errors / (val_errors.sum() + 1e-10)
             
             alpha = self.config.allocation_alpha 
             scores = alpha * u_norm + (1 - alpha) * e_norm
             
-            print("[Acquisition] Allocation Stats (Validation Metrics):")
-            print(f"  {'Output':<6} | {'Val Uncert':<12} | {'Val 1-R2':<12} | {'Score':<12}")
+            print("[Acquisition] Allocation Stats (Test Set Metrics):")
+            print(f"  {'Output':<6} | {'Test Uncert':<12} | {'Test 1-R2':<12} | {'Score':<12}")
             for i in range(self.num_outputs):
                 print(f"  x_{i+1:02d}   | {val_uncertainties[i]:.4e}   | {val_errors[i]:.4e}   | {scores[i]:.4f}")
             
@@ -1054,14 +996,8 @@ class BayesianOptimizer:
             for i, q_i in enumerate(quotas):
                 if q_i > 0:
                     print(f"  - x_{i+1:02d}: quota={q_i}")
-                
-            # --- Step 3: Retrain GP on full dataset for acquisition ---
-            print("[GP] Retraining on FULL dataset for acquisition...")
-            gp = self.fit_gp_model()
             
-            # Diagnostics (optional)
-            self.evaluate_model()
-
+            # --- Step 4: Optimization using the SAME GP ---
             bounds = torch.stack([
                 torch.zeros(self.dim, device=self.gp_device, dtype=self.dtype),
                 torch.ones(self.dim, device=self.gp_device, dtype=self.dtype)
@@ -1070,7 +1006,6 @@ class BayesianOptimizer:
             X_new_list = []
             current_batch_points = torch.empty((0, self.dim), dtype=self.dtype, device=self.gp_device)
 
-            # [Fix] Updated sampler API: sample_shape instead of num_samples
             sampler = SobolQMCNormalSampler(sample_shape=torch.Size([256]))
 
             for out_idx in range(self.num_outputs):
@@ -1078,10 +1013,10 @@ class BayesianOptimizer:
                 if q_i <= 0:
                     continue
                 
-                # Objective selects a single output dimension
                 def obj_fn(samples, X=None, idx=out_idx):
                     return samples[..., idx]
                 
+                # Pass the existing 'gp' model here
                 acq = qPosteriorStandardDeviation(
                     model=gp,
                     sampler=sampler,
@@ -1128,7 +1063,6 @@ class BayesianOptimizer:
                     success_count += 1
                     print(f"  -> Success {success_count}: avg disp={np.mean(disp):.6f}")
                     
-        # Final best point (by minimal mean absolute displacement)
         if self.train_Y_raw.shape[0] > 0:
             scores = self.train_Y_raw.abs().mean(dim=1).cpu().numpy()
             best_idx = np.argmin(scores)
