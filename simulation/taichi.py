@@ -6,8 +6,13 @@ from .xmlParser import MPMXMLData
 from .file_ops import FileOperations
 from config.config import MIN_ETA, MAX_ETA, MIN_N, MAX_N, MIN_SIGMA_Y, MAX_SIGMA_Y, MIN_WIDTH, MAX_WIDTH, MIN_HEIGHT, MAX_HEIGHT
 
+try:
+    ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+    print("[Bayesian6] Taichi initialized on GPU.")
+except Exception as e:
+    print(f"[Bayesian6] Warning: Taichi init failed or already initialized: {e}")
 
-ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
+# ti.init(arch=ti.gpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 # ti.init(arch=ti.cpu, offline_cache=True, default_fp=ti.f32, default_ip=ti.i32)
 gui = ti.GUI("AGTaichiMPM")
 
