@@ -1,7 +1,7 @@
 import os
 import math
 from simulation.taichi import MPMSimulator
-from optimization.Bayesian6 import BayesianOptimizer
+from optimization.Bayesian7 import BayesianOptimizer
 from config.config import (
     XML_TEMPLATE_PATH,
     DEFAULT_OUTPUT_DIR,
@@ -37,7 +37,7 @@ def run_optimization(
     batch_size: int,
     seed: int,
     output_dir: str = DEFAULT_OUTPUT_DIR,
-    svgp_threshold: int = 2000,
+    svgp_threshold: int = 3000,
 ):
     """
     Run Bayesian optimization for material parameters.
